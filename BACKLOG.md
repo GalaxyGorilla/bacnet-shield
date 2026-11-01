@@ -50,11 +50,13 @@ Done:
   clients — Who-Is, ReadProperty, a denied write with the tagged Error PDU,
   `SIGHUP` reload, an allowed write and read-back. See
   [CONFORMANCE.md](CONFORMANCE.md).
+- Connection-state observability: the node reports attach/detach through a
+  state handler, exposed as `bacnet_shield_sc_connected` (gauge) and
+  `bacnet_shield_sc_reconnects_total` (counter). `make interop-sc` scrapes
+  both across the hub restart, so a hub outage is visible on `/metrics`.
 
 Remaining:
 
-- SC connection-state observability (a connected/hub-status gauge) if an
-  appliance dashboard needs it; today a hub outage is visible only in the log.
 - UUID-keyed admission. The BVLL-SC data path carries the sender's VMAC but
   not its UUID; a UUID rule needs Address-Resolution and a bounded VMAC→UUID
   cache. `access.sc_allow` currently accepts VMAC entries only and rejects a

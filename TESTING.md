@@ -10,7 +10,7 @@ local `make` target.
 | Fuzzing | Nine native targets: `FuzzParseBVLC`, `FuzzParseNPDU`, `FuzzParseAPDU`, `FuzzParseObjectID`, `FuzzWriteTargets`, `FuzzTagReader`, `FuzzParse` and `FuzzDecodeMessage` (BVLL-SC), and `FuzzParseFrame` (WebSocket) |
 | Policy | Allow-list, per-client rate limit, read-only, scoped write rules, deny-overrides, allow-must-cover, service-level writes; SC VMAC allow-list and per-VMAC bucket |
 | Data plane | Real loopback UDP sockets, invoke-ID collision and reuse, retransmission dedupe, pending cap/expiry, routing strip, device source validation |
-| SC transport | Real in-process TLS 1.3 hub: connect handshake, heartbeat and heartbeat *timeout* (a hub that stops ACKing is dropped), reconnect and failover across a hub list, hostname verification, destination/origin filtering, and survival of a malformed frame and a non-binary WebSocket message |
+| SC transport | Real in-process TLS 1.3 hub: connect handshake, heartbeat and heartbeat *timeout* (a hub that stops ACKing is dropped), reconnect and failover across a hub list, hostname verification, destination/origin filtering, attach/detach state reporting, and survival of a malformed frame and a non-binary WebSocket message |
 | SC data plane | In-memory SC leg: two clients with the same invoke ID, an IP and an SC client sharing an invoke ID, per-VMAC ACL/rate, per-leg rate isolation, write denial shape, COV routing, I-Am fan-out, replay served across the leg boundary, shared pending |
 | COV | Subscription install after ACK, rejected subscription not routed, cancellation, expiry, multi-client fan-out, unroutable confirmed notification |
 | Segments | Segmented responses and device requests relayed with per-invoke tracking; segmented writes denied; a real peer's multi-segment response is reassembled through the proxy (`make interop`) |
@@ -131,7 +131,9 @@ builds bacnet-stack 1.6.1's hub (`bacschub`) and BSC clients (`bacwi`, `bacrp`,
    write and a read-back over BACnet/SC with a bacnet-stack client that is a
    second node of the same hub;
 5. restarts the hub container and checks the node re-attaches and keeps
-   serving;
+   serving, scraping `/metrics` to confirm `bacnet_shield_sc_connected` is 1
+   both before and after the restart and `bacnet_shield_sc_reconnects_total`
+   advances;
 6. subscribes a bacnet-stack COV client to the device over SC and asserts it
    receives both the initial notification and the one triggered by a write —
    device-originated routing to the subscriber's VMAC through the hub.

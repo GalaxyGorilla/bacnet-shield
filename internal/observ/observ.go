@@ -57,6 +57,9 @@ type Metrics struct {
 
 	Pending       prometheus.Gauge
 	Subscriptions prometheus.Gauge
+	SCConnected   prometheus.Gauge
+
+	SCReconnects prometheus.Counter
 }
 
 // NewMetrics builds an isolated registry with the gateway instruments.
@@ -84,6 +87,8 @@ func NewMetrics() *Metrics {
 		NotificationsDropped: f.NewCounter(prometheus.CounterOpts{Name: "bacnet_shield_notifications_dropped_total", Help: "Device notifications with no client to receive them."}),
 		Pending:              f.NewGauge(prometheus.GaugeOpts{Name: "bacnet_shield_pending", Help: "Requests currently in flight toward the device."}),
 		Subscriptions:        f.NewGauge(prometheus.GaugeOpts{Name: "bacnet_shield_cov_subscriptions", Help: "Active COV subscriptions routed by the proxy."}),
+		SCConnected:          f.NewGauge(prometheus.GaugeOpts{Name: "bacnet_shield_sc_connected", Help: "1 while the BACnet/SC leg is attached to a hub, 0 otherwise."}),
+		SCReconnects:         f.NewCounter(prometheus.CounterOpts{Name: "bacnet_shield_sc_reconnects_total", Help: "Successful re-attaches to a hub after the first connection."}),
 	}
 }
 

@@ -114,7 +114,8 @@ type Node struct {
 	hubStatus uint8
 	hubSeen   bool
 
-	onNPDU func(orig *sc.MAC, npdu []byte)
+	onNPDU  func(orig *sc.MAC, npdu []byte)
+	onState StateHandler
 }
 
 // NewNode validates cfg and returns a node ready to Run.
@@ -151,6 +152,22 @@ func NewNode(cfg NodeConfig, log *zap.Logger) (*Node, error) {
 // shorthand; npdu is valid only for the duration of the call. It must be set
 // before Run.
 func (n *Node) SetNPDUHandler(fn func(orig *sc.MAC, npdu []byte)) { n.onNPDU = fn }
+
+// StateHandler is notified whenever the node's hub link comes up (connected)
+// or goes down. hub is the URL of the hub the transition applies to. It runs
+// on the node's goroutine, so it must not block.
+type StateHandler func(connected bool, hub string)
+
+// SetStateHandler registers a connection-state observer. It must be set before
+// Run. Without one the node behaves exactly as before; the datapath never
+// depends on it.
+func (n *Node) SetStateHandler(fn StateHandler) { n.onState = fn }
+
+func (n *Node) notifyState(connected bool, hub string) {
+	if n.onState != nil {
+		n.onState(connected, hub)
+	}
+}
 
 // VMAC returns the node's own virtual MAC.
 func (n *Node) VMAC() sc.MAC { return n.cfg.VMAC }
@@ -265,7 +282,11 @@ func (n *Node) connectAndServe(ctx context.Context, hub hubURL) (connected bool,
 		return false, err
 	}
 	n.setConn(conn)
-	defer n.clearConn()
+	n.notifyState(true, hub.raw)
+	defer func() {
+		n.clearConn()
+		n.notifyState(false, hub.raw)
+	}()
 
 	n.log.Info("sc: attached to hub",
 		zap.String("hub", hub.raw),

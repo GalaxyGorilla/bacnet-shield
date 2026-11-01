@@ -331,6 +331,54 @@ func TestNodeConnectsSendsAndReceives(t *testing.T) {
 	}
 }
 
+func TestNodeStateHandler(t *testing.T) {
+	h := newTestHub(t)
+	n := testNode(t, h, NodeConfig{})
+
+	type event struct {
+		connected bool
+		hub       string
+	}
+	events := make(chan event, 8)
+	n.SetStateHandler(func(connected bool, hub string) {
+		events <- event{connected: connected, hub: hub}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = n.Run(ctx) }()
+
+	// Connecting must be reported exactly once, with the hub URL, so a
+	// dashboard can show the SC leg up even before the first NPDU.
+	select {
+	case ev := <-events:
+		if !ev.connected {
+			t.Fatalf("first state event = %+v, want connected", ev)
+		}
+		if ev.hub != h.url {
+			t.Fatalf("hub = %q, want %q", ev.hub, h.url)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no connected state event")
+	}
+	waitConnected(t, n, 3*time.Second)
+
+	// Shutting down must report the link down, so the gauge falls back to 0
+	// instead of freezing at 1.
+	cancel()
+	select {
+	case ev := <-events:
+		if ev.connected {
+			t.Fatalf("second state event = %+v, want disconnected", ev)
+		}
+		if ev.hub != h.url {
+			t.Fatalf("hub = %q, want %q", ev.hub, h.url)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no disconnected state event on shutdown")
+	}
+}
+
 func TestNodeFiltersInboundNPDUs(t *testing.T) {
 	h := newTestHub(t)
 	n := testNode(t, h, NodeConfig{})

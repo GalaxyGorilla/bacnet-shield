@@ -99,6 +99,26 @@ wait_for_count() {
 	return 1
 }
 
+scrape_metrics() {
+	# Python is already a hard dependency of this script, so it doubles as the
+	# metrics client instead of adding a curl requirement.
+	"$PY" -c 'import sys,urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=2).read().decode())' \
+		"http://${METRICS_ADDR}/metrics"
+}
+
+wait_for_metric() {
+	# wait_for_metric <regex> <tenths>
+	i=0
+	while [ "$i" -lt "$2" ]; do
+		if scrape_metrics 2>/dev/null | grep -q "$1"; then
+			return 0
+		fi
+		sleep 0.1
+		i=$((i + 1))
+	done
+	return 1
+}
+
 # bsc runs one bacnet-stack client tool inside the hub container. The container
 # carries the tools, and the client is another SC node of the same hub.
 bsc() {
@@ -115,6 +135,7 @@ bsc() {
 
 DEV_ADDR="127.0.0.1:47810"
 PROXY_ADDR="127.0.0.1:47811"
+METRICS_ADDR="127.0.0.1:47812"
 
 echo "== generating the interop PKI (SAN 127.0.0.1, so the Go node verifies the hub)"
 sh scripts/sc-certs.sh "$certdir" >/dev/null
@@ -144,6 +165,8 @@ listen_addr: "$PROXY_ADDR"
 device_addr: "$DEV_ADDR"
 device_instance: 1001
 log_level: info
+metrics:
+  addr: "$METRICS_ADDR"
 access:
   read_only: true
 sc:
@@ -161,6 +184,8 @@ listen_addr: "$PROXY_ADDR"
 device_addr: "$DEV_ADDR"
 device_instance: 1001
 log_level: info
+metrics:
+  addr: "$METRICS_ADDR"
 access:
   write_policy:
     default: deny
@@ -186,6 +211,10 @@ pids="$pids $!"
 # A successful attach proves both that the hub is up and that the Go node
 # verified the hub's certificate and completed the Connect handshake.
 wait_for "$gw_log" "attached to hub" 100 || fail "gateway did not attach to the hub"
+
+echo "== metrics show the SC leg up while attached"
+wait_for_metric '^bacnet_shield_sc_connected 1$' 30 ||
+	fail "sc_connected gauge not 1 after attach (got: $(scrape_metrics 2>/dev/null | grep sc_connected || true))"
 
 echo "== Who-Is over SC reaches device 1001 through the proxy"
 whois="$(bsc bacwi --timeout 2000)" || fail "bacwi failed"
@@ -225,6 +254,10 @@ attached_before="$(grep -c 'attached to hub' "$gw_log" || true)"
 docker restart "$HUB_NAME" >/dev/null || fail "hub did not restart"
 wait_for_count "$gw_log" "attached to hub" "$((attached_before + 1))" 300 ||
 	fail "node did not re-attach to the hub after it restarted"
+
+echo "== metrics count the re-attach"
+wait_for_metric '^bacnet_shield_sc_reconnects_total [1-9][0-9]*$' 30 ||
+	fail "reconnect not reflected on the metrics endpoint (got: $(scrape_metrics 2>/dev/null | grep sc_reconnects || true))"
 after="$(bsc bacrp 1001 analog-value 1 present-value)" || fail "read after hub restart failed"
 echo "$after" | grep -q "3.500000" || fail "value changed across a hub restart (got: $after)"
 

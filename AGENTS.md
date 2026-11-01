@@ -250,6 +250,10 @@ Done in v1:
   reload to a scoped policy, an allowed write, a read-back, and a COV
   subscriber that receives the initial and the change-triggered notification.
   This found the originating-VMAC defect recorded in `CONFORMANCE.md`.
+- SC connection-state observability: the node reports attach/detach through a
+  state handler, exposed as the `bacnet_shield_sc_connected` gauge and
+  `bacnet_shield_sc_reconnects_total` counter, so a hub outage is visible on
+  `/metrics`. `make interop-sc` scrapes both across a hub restart.
 
 Known boundaries:
 
@@ -259,7 +263,6 @@ Known boundaries:
   rather than pretending to enforce it.
 - No SC hub role and no SC direct (node-to-node) connections; the proxy is
   always a WebSocket client of a hub.
-- No SC connection-state metric yet; a hub outage is visible in the log only.
 - No BBMD/router; one device per instance.
 - Segmented writes are refused; SubscribeCOVPropertyMultiple is refused.
 - The proxy does not reassemble segmented payloads; it tracks and relays them.

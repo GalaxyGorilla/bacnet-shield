@@ -148,6 +148,21 @@ func runGateway(args []string) int {
 		// Attach before Serve: a hub can deliver an NPDU as soon as the node
 		// connects, and the handler must already be in place.
 		g.AttachSC(scNode)
+		// Expose the link state: a hub outage must be visible on the metrics
+		// endpoint, not only in the log. The handler runs on the node's
+		// goroutine, so the "already attached" flag needs no lock.
+		attached := false
+		scNode.SetStateHandler(func(connected bool, hub string) {
+			if !connected {
+				metrics.SCConnected.Set(0)
+				return
+			}
+			if attached {
+				metrics.SCReconnects.Inc()
+			}
+			attached = true
+			metrics.SCConnected.Set(1)
+		})
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

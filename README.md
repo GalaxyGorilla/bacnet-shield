@@ -259,6 +259,8 @@ Set `metrics.addr` (or `--metrics-addr`) to expose a Prometheus scrape at
 | `bacnet_shield_notifications_dropped_total` | Device notifications with no client to receive them |
 | `bacnet_shield_pending` | Requests currently in flight toward the device |
 | `bacnet_shield_cov_subscriptions` | Active COV subscriptions routed by the proxy |
+| `bacnet_shield_sc_connected` | 1 while the BACnet/SC leg is attached to a hub, 0 otherwise |
+| `bacnet_shield_sc_reconnects_total` | Successful re-attaches to a hub after the first connection |
 
 ## Tools
 
