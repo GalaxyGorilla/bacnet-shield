@@ -53,7 +53,8 @@ bacnet-shield is the boundary instead:
 - **Client allow-list** — only the BMS/SCADA segment reaches the device; an
   off-list peer is dropped silently.
 - **Per-client rate limit** — one runaway poller cannot spend the device's
-  capacity for everyone else.
+  capacity for everyone else; an optional shared budget caps the total rate
+  toward the device even when many clients poll at once.
 - **Write protection** — either all-or-nothing read-only, or rules scoped to
   `<object-type>:<instance>:<property>` with `*` wildcards.
 - **Honest refusals** — a denied write is answered with a BACnet Error PDU
@@ -173,6 +174,7 @@ access:
   allow: ["10.8.0.0/24", "192.168.1.7"]   # client allow-list (IP or CIDR)
   sc_allow: ["02:00:00:00:00:0a"]         # SC allow-list (VMAC)
   rate_per_sec: 50                        # per-client request rate (0 = off)
+  device_rate_per_sec: 200                # shared rate toward the device (0 = off)
   read_only: true                         # refuse every write
   # ...or, instead of read_only, a scope-limited write policy:
   # write_policy:
@@ -183,9 +185,14 @@ access:
 ```
 
 `read_only` and `write_policy` are mutually exclusive; both at once is a config
-error. `allow`, `sc_allow` and `rate_per_sec` are independent and optional.
-Write protection is **opt-in** — with neither configured, writes pass through
-unchanged — so turn it on deliberately.
+error. `allow`, `sc_allow`, `rate_per_sec` and `device_rate_per_sec` are
+independent and optional. The `rate_per_sec` bucket is keyed per client and is
+the fairness control; `device_rate_per_sec` is a single shared bucket that bounds
+the **total** rate toward the one device, so a fragile device is protected even
+when many well-behaved clients poll at once. A request already refused by its own
+per-client limit never charges the shared budget. Write protection is
+**opt-in** — with neither configured, writes pass through unchanged — so turn it
+on deliberately.
 
 The write-policy evaluation rules are intentionally the same as the other Shield
 proxies:
@@ -215,7 +222,7 @@ Denials are explicit per policy class:
 
 | Situation | Wire result |
 |---|---|
-| Off-list client, or over the rate limit | Silent drop (never advertise the proxy) |
+| Off-list client, over the rate limit, or over the shared device budget | Silent drop (never advertise the proxy) |
 | Write refused by policy | Error PDU, class `security` (4), code `write-access-denied` (40) |
 | Unsupported subscription service | Error PDU, class `services` (5), code `service-request-denied` (29) |
 | Confirmed COV notification with no subscriber | Error PDU, class `services` (5), code `unknown-subscription` (79) |
@@ -391,6 +398,7 @@ the monitoring network is trusted.
 | `bacnet_shield_responses_total` | Device answers relayed to a client |
 | `bacnet_shield_acl_denied_total` | Requests dropped by the IP or SC allow-list |
 | `bacnet_shield_rate_limited_total` | Requests dropped by the per-client rate limit |
+| `bacnet_shield_device_rate_limited_total` | Requests dropped by the shared per-device rate budget |
 | `bacnet_shield_writes_denied_total` | Writes refused by the write policy |
 | `bacnet_shield_parse_errors_total` | Undecodable datagrams dropped |
 | `bacnet_shield_pending_full_total` | Requests dropped because every invoke ID was in flight |

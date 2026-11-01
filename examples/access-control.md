@@ -11,6 +11,7 @@ access:
   allow: ["10.8.0.0/24", "192.168.1.7"]   # client allow-list (IP or CIDR)
   sc_allow: ["02:00:00:00:00:0a"]         # SC allow-list (VMAC)
   rate_per_sec: 50                        # per-client request rate (0 = off)
+  device_rate_per_sec: 200                # shared rate toward the device (0 = off)
   read_only: true                         # refuse every write
   # ...or, instead of read_only, a scope-limited write policy:
   # write_policy:
@@ -21,10 +22,11 @@ access:
 ```
 
 `read_only` and `write_policy` are mutually exclusive; both at once is a config
-error. `allow`, `sc_allow` and `rate_per_sec` are independent and optional.
-Write protection is **opt-in**: with neither `read_only` nor `write_policy`
-configured, writes pass through unchanged — the same "protection is opt-in"
-shape as the other Shield proxies. Turn it on deliberately.
+error. `allow`, `sc_allow`, `rate_per_sec` and `device_rate_per_sec` are
+independent and optional. Write protection is **opt-in**: with neither
+`read_only` nor `write_policy` configured, writes pass through unchanged — the
+same "protection is opt-in" shape as the other Shield proxies. Turn it on
+deliberately.
 
 ## Client allow-list
 
@@ -50,6 +52,30 @@ a flood, not to chat with it.
 Because the bucket is keyed by the client, one runaway poller is refused its own
 requests rather than spending the budget everyone else needs. On the SC leg the
 bucket is keyed by VMAC, so two SC nodes never share a limit.
+
+## Shared device budget
+
+`rate_per_sec` bounds one client; `device_rate_per_sec` bounds **all of them
+together**, which is what protects a device whose real limit is total traffic
+rather than per-poller traffic. It is a single shared token bucket (burst = the
+rate):
+
+- the per-client bucket is charged **first**, so a request already refused by a
+  client's own limit never spends the shared budget;
+- an off-list client never reaches either bucket;
+- the IP leg and the SC leg charge the **same** budget, so an SC node cannot
+  bypass the ceiling the IP clients live under;
+- over-budget requests are **silently dropped** and counted as
+  `bacnet_shield_device_rate_limited_total`.
+
+Set it when many otherwise-reasonable pollers (a BMS, a dashboard, an
+engineering tool) add up to more than the device can answer:
+
+```yaml
+access:
+  rate_per_sec: 50          # each client may burst 50/s
+  device_rate_per_sec: 200  # ...but the device never sees more than 200/s total
+```
 
 ## Write protection
 
@@ -107,6 +133,7 @@ The three cases are deliberately different:
 |---|---|---|
 | Client not on the allow-list | **Silent drop** | An off-list peer must not learn a proxy is there; an error would amplify a flood. |
 | Client over the rate limit | **Silent drop** | Same reasoning: the limit absorbs a flood, it does not negotiate with one. |
+| Client over the shared device budget | **Silent drop** | Same: the budget protects the device from the sum of the pollers, silently. |
 | Write refused by policy | **Error PDU**, class `security` (4), code `write-access-denied` (40) | The peer is legitimate; a timeout would only make it retransmit into the policy forever. |
 | Unsupported subscription service | **Error PDU**, class `services` (5), code `service-request-denied` (29) | The device must not install a subscription the proxy cannot track. |
 | Confirmed COV notification with no subscriber | **Error PDU**, class `services` (5), code `unknown-subscription` (79) | Answers the device so it stops retransmitting a notification nobody wants. |
@@ -126,7 +153,8 @@ kill -HUP "$(cat /run/bacnet-shield.pid)"   # or: systemctl reload bacnet-shield
 ```
 
 Reloadable: `access.allow`, `access.sc_allow`, `access.rate_per_sec`,
-`access.read_only`, `access.write_policy`. The policy is read per datagram, so
+`access.device_rate_per_sec`, `access.read_only`, `access.write_policy`. The
+policy is read per datagram, so
 the swap takes effect on the next packet with no listener rebind and no dropped
 clients.
 

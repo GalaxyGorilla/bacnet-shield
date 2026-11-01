@@ -18,13 +18,14 @@ type Options struct {
 	RequestTimeout  int
 	MaxPending      int
 
-	Allow        []string
-	SCAllow      []string
-	RatePerSec   float64
-	ReadOnly     bool
-	WriteDefault string
-	WriteAllow   []string
-	WriteDeny    []string
+	Allow            []string
+	SCAllow          []string
+	RatePerSec       float64
+	DeviceRatePerSec float64
+	ReadOnly         bool
+	WriteDefault     string
+	WriteAllow       []string
+	WriteDeny        []string
 
 	SCVMAC     string
 	SCUUID     string
@@ -51,6 +52,7 @@ func Register(fs *pflag.FlagSet) *Options {
 	fs.StringArrayVar(&o.Allow, "allow", nil, "client IP/CIDR allow-list entry (repeatable)")
 	fs.StringArrayVar(&o.SCAllow, "sc-allow", nil, "BACnet/SC client VMAC allow-list entry (repeatable)")
 	fs.Float64Var(&o.RatePerSec, "rate-per-sec", 0, "per-client request rate limit (0 = off)")
+	fs.Float64Var(&o.DeviceRatePerSec, "device-rate-per-sec", 0, "shared request rate toward the device, all clients combined (0 = off)")
 	fs.BoolVar(&o.ReadOnly, "read-only", false, "refuse every write")
 	fs.StringVar(&o.WriteDefault, "write-default", "", "write policy default: allow|deny (enables the policy)")
 	fs.StringArrayVar(&o.WriteAllow, "write-allow", nil, "allow rule: <type>:<instance>:<property> (repeatable)")
@@ -83,10 +85,11 @@ func (o *Options) Build() (*Config, error) {
 		c.DeviceInstance = &v
 	}
 	c.Access = Access{
-		Allow:      o.Allow,
-		SCAllow:    o.SCAllow,
-		RatePerSec: o.RatePerSec,
-		ReadOnly:   o.ReadOnly,
+		Allow:            o.Allow,
+		SCAllow:          o.SCAllow,
+		RatePerSec:       o.RatePerSec,
+		DeviceRatePerSec: o.DeviceRatePerSec,
+		ReadOnly:         o.ReadOnly,
 	}
 	c.SC = SC{
 		VMAC:     o.SCVMAC,

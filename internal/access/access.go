@@ -28,6 +28,7 @@ const (
 	Allow Decision = iota
 	DenyACL
 	DenyRate
+	DenyDevice
 )
 
 func (d Decision) String() string {
@@ -38,6 +39,8 @@ func (d Decision) String() string {
 		return "acl"
 	case DenyRate:
 		return "rate"
+	case DenyDevice:
+		return "device"
 	default:
 		return "unknown"
 	}
@@ -134,10 +137,11 @@ func (l *MACList) Allowed(vmac sc.MAC) bool {
 
 // Policy is the complete front-leg request policy.
 type Policy struct {
-	list  *List
-	scs   *MACList
-	limit *Limit
-	write *WritePolicy
+	list   *List
+	scs    *MACList
+	limit  *Limit
+	budget *Budget
+	write  *WritePolicy
 }
 
 // NewPolicy compiles the three IP-leg parts. Any of them may be nil/empty.
@@ -157,10 +161,25 @@ func (p *Policy) WithSCAllow(list *MACList) *Policy {
 	return &cp
 }
 
+// WithDeviceBudget returns a copy of the policy with a shared per-device
+// budget. The budget bounds the total request rate toward the one device; the
+// per-client Limit is the fairness control. A nil budget disables it. Like
+// WithSCAllow, the copy keeps a reload from mutating an in-use policy.
+func (p *Policy) WithDeviceBudget(b *Budget) *Policy {
+	if p == nil {
+		return &Policy{budget: b}
+	}
+	cp := *p
+	cp.budget = b
+	return &cp
+}
+
 // Check runs the IP-leg client checks in order: an off-list client never
 // consumes a rate-limit token, so a spoofed-source flood cannot drain another
 // client's budget (and cannot grow the bucket table for clients that may not
-// talk to us at all).
+// talk to us at all). The per-client limit is charged before the shared device
+// budget, so a client already over its own limit cannot spend the budget the
+// other clients need.
 func (p *Policy) Check(ip net.IP, now time.Time) Decision {
 	if p == nil {
 		return Allow
@@ -171,13 +190,17 @@ func (p *Policy) Check(ip net.IP, now time.Time) Decision {
 	if !p.limit.Allow(ip, now) {
 		return DenyRate
 	}
+	if !p.budget.Allow(now) {
+		return DenyDevice
+	}
 	return Allow
 }
 
 // CheckSC runs the BACnet/SC client checks. SC nodes are addressed by VMAC,
 // not by IP, so the IP allow-list does not apply; the VMAC allow-list takes
 // its place and the rate bucket is keyed by VMAC. An SC allow-list entry and
-// an IP entry can never share a bucket because the SC key is prefixed.
+// an IP entry can never share a bucket because the SC key is prefixed. The
+// shared device budget is the same one the IP leg charges.
 func (p *Policy) CheckSC(vmac sc.MAC, now time.Time) Decision {
 	if p == nil {
 		return Allow
@@ -187,6 +210,9 @@ func (p *Policy) CheckSC(vmac sc.MAC, now time.Time) Decision {
 	}
 	if !p.limit.AllowKey("sc:"+vmac.String(), now) {
 		return DenyRate
+	}
+	if !p.budget.Allow(now) {
+		return DenyDevice
 	}
 	return Allow
 }
@@ -280,6 +306,61 @@ func (l *Limit) AllowKey(key string, now time.Time) bool {
 			b.tokens = l.burst
 		}
 		b.last = now
+	}
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+// Budget is a single shared token bucket that bounds the total request rate
+// toward the one device, no matter how many clients poll it. It complements
+// the per-client Limit: the Limit is the fairness control, the Budget protects
+// a fragile device from the sum of many individually-reasonable pollers.
+//
+// Because the proxy has exactly one device, there is one bucket and no table;
+// unlike Limit it cannot grow, so it needs no cap or sweep.
+type Budget struct {
+	rate  float64
+	burst float64
+
+	mu     sync.Mutex
+	tokens float64
+	last   time.Time
+}
+
+// NewBudget returns nil for a non-positive rate, meaning "no device budget".
+func NewBudget(ratePerSec float64) *Budget {
+	if ratePerSec <= 0 {
+		return nil
+	}
+	return &Budget{rate: ratePerSec, burst: ratePerSec}
+}
+
+// Allow charges one token to the shared device budget. A fresh budget starts
+// full, so the very first request is admitted rather than delayed a full
+// interval.
+func (b *Budget) Allow(now time.Time) bool {
+	if b == nil {
+		return true
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.last.IsZero() {
+		b.last = now
+		b.tokens = b.burst
+	} else {
+		elapsed := now.Sub(b.last).Seconds()
+		if elapsed > 0 {
+			b.tokens += elapsed * b.rate
+			if b.tokens > b.burst {
+				b.tokens = b.burst
+			}
+			b.last = now
+		}
 	}
 	if b.tokens < 1 {
 		return false

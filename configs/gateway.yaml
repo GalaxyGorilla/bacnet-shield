@@ -78,6 +78,14 @@ access:
   # 0/omitted = no limit.
   rate_per_sec: 50
 
+  # Optional SHARED budget: the total request rate toward the one device, all
+  # clients combined (requests/second, burst = rate). rate_per_sec is the
+  # per-client fairness control; this is the ceiling that protects a fragile
+  # device even when many well-behaved clients poll at once. A request already
+  # refused by its own per-client limit never charges the shared budget.
+  # 0/omitted = no shared budget.
+  # device_rate_per_sec: 200
+
   # All-or-nothing write protection. A refused write is answered with a
   # BACnet Error PDU (class security=4, code write-access-denied=40), so the
   # client fails immediately instead of timing out. Mutually exclusive with

@@ -47,6 +47,7 @@ type Metrics struct {
 	Responses            prometheus.Counter
 	ACLDenied            prometheus.Counter
 	RateLimited          prometheus.Counter
+	DeviceRateLimited    prometheus.Counter
 	WritesDenied         prometheus.Counter
 	ParseErrors          prometheus.Counter
 	PendingFull          prometheus.Counter
@@ -78,6 +79,7 @@ func NewMetrics() *Metrics {
 		Responses:            f.NewCounter(prometheus.CounterOpts{Name: "bacnet_shield_responses_total", Help: "Device answers relayed to a client."}),
 		ACLDenied:            f.NewCounter(prometheus.CounterOpts{Name: "bacnet_shield_acl_denied_total", Help: "Datagrams dropped by the client allow-list."}),
 		RateLimited:          f.NewCounter(prometheus.CounterOpts{Name: "bacnet_shield_rate_limited_total", Help: "Datagrams dropped by the per-client rate limit."}),
+		DeviceRateLimited:    f.NewCounter(prometheus.CounterOpts{Name: "bacnet_shield_device_rate_limited_total", Help: "Datagrams dropped by the shared per-device rate budget."}),
 		WritesDenied:         f.NewCounter(prometheus.CounterOpts{Name: "bacnet_shield_writes_denied_total", Help: "Writes refused by the write policy."}),
 		ParseErrors:          f.NewCounter(prometheus.CounterOpts{Name: "bacnet_shield_parse_errors_total", Help: "Undecodable datagrams dropped."}),
 		PendingFull:          f.NewCounter(prometheus.CounterOpts{Name: "bacnet_shield_pending_full_total", Help: "Requests dropped because every invoke ID was in flight."}),

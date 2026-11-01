@@ -144,6 +144,7 @@ func TestLoadCheckedFlags(t *testing.T) {
 		"--write-allow", "analog-value:5:present-value",
 		"--allow", "127.0.0.0/8",
 		"--rate-per-sec", "10",
+		"--device-rate-per-sec", "40",
 		"--max-pending", "16",
 	}); err != nil {
 		t.Fatal(err)
@@ -152,7 +153,7 @@ func TestLoadCheckedFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadChecked: %v", err)
 	}
-	if cfg.MaxPending != 16 || cfg.Access.RatePerSec != 10 || len(cfg.Access.Allow) != 1 {
+	if cfg.MaxPending != 16 || cfg.Access.RatePerSec != 10 || cfg.Access.DeviceRatePerSec != 40 || len(cfg.Access.Allow) != 1 {
 		t.Fatalf("flags were not mapped: %+v", cfg)
 	}
 	pol, err := cfg.AccessPolicy()

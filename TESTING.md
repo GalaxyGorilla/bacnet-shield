@@ -8,7 +8,7 @@ local `make` target.
 |---|---|
 | Codecs | BVLC, NPDU, APDU, tags, object IDs and write targets; malformed, truncated, extended-tag and segmented vectors |
 | Fuzzing | Nine native targets: `FuzzParseBVLC`, `FuzzParseNPDU`, `FuzzParseAPDU`, `FuzzParseObjectID`, `FuzzWriteTargets`, `FuzzTagReader`, `FuzzParse` and `FuzzDecodeMessage` (BVLL-SC), and `FuzzParseFrame` (WebSocket) |
-| Policy | Allow-list, per-client rate limit, read-only, scoped write rules, deny-overrides, allow-must-cover, service-level writes; SC VMAC allow-list and per-VMAC bucket |
+| Policy | Allow-list, per-client rate limit, optional shared per-device budget, read-only, scoped write rules, deny-overrides, allow-must-cover, service-level writes; SC VMAC allow-list and per-VMAC bucket |
 | Data plane | Real loopback UDP sockets, invoke-ID collision and reuse, retransmission dedupe, pending cap/expiry, routing strip, device source validation |
 | SC transport | Real in-process TLS 1.3 hub: connect handshake, heartbeat and heartbeat *timeout* (a hub that stops ACKing is dropped), reconnect and failover across a hub list, hostname verification, destination/origin filtering, attach/detach state reporting, and survival of a malformed frame and a non-binary WebSocket message |
 | SC data plane | In-memory SC leg: two clients with the same invoke ID, an IP and an SC client sharing an invoke ID, per-VMAC ACL/rate, per-leg rate isolation, write denial shape, COV routing, I-Am fan-out, replay served across the leg boundary, shared pending |

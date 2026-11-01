@@ -483,6 +483,7 @@ Usage (config file):
 Usage (flags, no config file — plug and play):
   bacnet-shield gateway --listen <ip:port> --device <legacy-device:port> \
       [--read-only] [--allow <ip|cidr>]... [--rate-per-sec <n>] \
+      [--device-rate-per-sec <n>] \
       [--write-default deny|allow] [--write-allow <spec>]... \
       [--write-deny <spec>]... [--request-timeout <secs>] \
       [--max-pending <n>] [--device-instance <n>] \
@@ -500,7 +501,8 @@ The gateway sits between a building's clients and ONE legacy device:
 It rewrites only the network layer and the APDU invoke ID; the service
 payload is forwarded byte for byte, so vendor quirks survive. Client-leg
 policy is enforced before anything reaches the device: an allow-list, a
-per-client rate limit, and an object/property-scoped write policy. ACL and
+per-client rate limit (plus an optional shared device budget), and an
+object/property-scoped write policy. ACL and
 rate denials are silent; a refused write is answered with a BACnet Error
 PDU (class security, code write-access-denied) so the client is not left
 waiting for a timeout.

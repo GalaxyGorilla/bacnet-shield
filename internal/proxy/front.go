@@ -104,6 +104,10 @@ func (g *Gateway) handleSCNPDU(orig *sc.MAC, npdu []byte) {
 		g.metrics.RateLimited.Inc()
 		g.log.Debug("sc client denied by rate limit", zap.Stringer("client", &scPeer{vmac: *orig}))
 		return
+	case access.DenyDevice:
+		g.metrics.DeviceRateLimited.Inc()
+		g.log.Debug("sc client denied by the shared device budget", zap.Stringer("client", &scPeer{vmac: *orig}))
+		return
 	}
 
 	p := &scPeer{vmac: *orig, leg: g.scLeg}

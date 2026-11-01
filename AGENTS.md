@@ -37,7 +37,7 @@ rewritten, and only the front-leg policy can reject a request.
 | Forwarding level | Parse BVLC/NPDU/APDU enough to route and gate; forward the **service payload opaquely**. No re-encoding, no property cache |
 | Correlation | **Rewrite the invoke ID**, not the payload. Per-client ↔ device-leg translation with a 256-entry pending table and a 30 s completed-response cache |
 | Retransmissions | A retransmission of an in-flight request is **dropped** (re-sending a write applies it twice). A finished response is replayed from cache |
-| Security v1 | IP/CIDR allow-list + per-client token bucket + `read_only` **or** `<object-type>:<instance>:<property>` write policy. Write protection is opt-in: with neither configured, writes pass through. Deny-overrides, allow-must-cover, fail-closed on undecodable/segmented writes |
+| Security v1 | IP/CIDR allow-list + per-client token bucket + optional shared per-device budget + `read_only` **or** `<object-type>:<instance>:<property>` write policy. Write protection is opt-in: with neither configured, writes pass through. Deny-overrides, allow-must-cover, fail-closed on undecodable/segmented writes |
 | Denial shape | ACL/rate denials are silent. A refused write gets Error class `security` (4) / code `write-access-denied` (40). Unsupported subscriptions get class `services` (5) / code `service-request-denied` (29). An unroutable confirmed COV gets code `unknown-subscription` (79) |
 | COV | Track `SubscribeCOV` and `SubscribeCOVProperty` (one monitored object each). Install only after a SimpleACK. `SubscribeCOVPropertyMultiple` is refused |
 | Config changes | `SIGHUP` re-reads `--config` and swaps only the access policy (including `access.sc_allow`). Listener/device/timeout/log/metrics and the whole `sc` block are reported as restart-only warnings. Invalid reload keeps the running policy |
@@ -56,7 +56,7 @@ cmd/bacnet-shield/     CLI: gateway | validate | selftest | version | help
 internal/bacnet/       Wire codecs (BVLC, NPDU, APDU, tags, object IDs, services)
 internal/bacnet/sc/    BACnet/SC virtual link layer (BVLL-SC) codec
 internal/scnet/        SC transport: TLS 1.3, WebSocket framing, node↔hub state machine
-internal/access/       Allow-list, token bucket, write policy
+internal/access/       Allow-list, per-client token bucket, shared device budget, write policy
 internal/config/       YAML + flags, validation, access-policy compilation
 internal/proxy/        Data plane: routing, invoke IDs, COV, firmware probe
 internal/observ/       zap logger, Prometheus registry, /metrics listener
@@ -73,12 +73,13 @@ scripts/               bacpypes3 peer provisioning and interop drivers
 ### Data path
 
 1. `clientLoop` reads a datagram, applies `Policy.Check` (ACL first, then the
-   rate limit; an off-list source never consumes another client's token),
-   parses BVLC, wraps the source in a `udpPeer`, and calls
+   per-client rate limit, then the shared device budget; an off-list source
+   never consumes another client's token, and a rate-denied request never spends
+   the shared budget), parses BVLC, wraps the source in a `udpPeer`, and calls
    `handleClientNPDU`.
    The SC leg's `handleSCNPDU` applies `Policy.CheckSC` (VMAC allow-list, then a
-   VMAC-keyed rate limit) before parsing, wraps the sender VMAC in an `scPeer`,
-   and calls the same `handleClientNPDU`.
+   VMAC-keyed rate limit, then the same shared device budget) before parsing,
+   wraps the sender VMAC in an `scPeer`, and calls the same `handleClientNPDU`.
 2. `handleClientConfirmed` refuses unsupported subscription services, applies
    `AllowWrite`, and calls `forwardConfirmed`.
 3. `forwardConfirmed` allocates a device invoke ID, patches the octet, records
@@ -151,7 +152,8 @@ compile to the same `config.Config`, so validation and the daemon cannot
 drift.
 
 Reloadable on `SIGHUP`: `access.allow`, `access.sc_allow`,
-`access.rate_per_sec`, `access.read_only`, `access.write_policy`.
+`access.rate_per_sec`, `access.device_rate_per_sec`, `access.read_only`,
+`access.write_policy`.
 
 Restart-only (reported, never silently ignored): `listen_addr`,
 `device_addr`, `device_local_addr`, `device_instance`,
@@ -216,7 +218,8 @@ Done in v1:
 - Codecs for BVLC, NPDU, APDU, tags, object IDs, properties, write targets,
   COV subscription/notification fields, I-Am, error/reject builders.
 - Codec fuzzing (6 targets, all green).
-- Allow-list, per-client token bucket, read-only and scoped write policies.
+- Allow-list, per-client token bucket, optional shared per-device rate budget,
+  read-only and scoped write policies.
 - Invoke-ID translation, pending cap/expiry, completed-response replay,
   in-flight retransmission drop, segmented response/request tracking.
 - Write denial with the correct tagged Error PDU; unsupported subscription

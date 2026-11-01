@@ -197,8 +197,10 @@ route and gate).
   `read_only` and `write_policy` are mutually exclusive; both at once is a
   config error.
 - **Protect the device's polling capacity** — `rate_per_sec` caps each client;
-  `max_pending` (default 256) caps how many of its requests may be in flight at
-  once. The device is never asked to answer faster than the policy allows.
+  `device_rate_per_sec` caps the total across all clients, so a device whose
+  real limit is aggregate traffic is protected even when several well-behaved
+  pollers add up. `max_pending` (default 256) caps how many requests may be in
+  flight at once.
 - **Pin the device-leg source** — `device_local_addr` fixes the source address
   the proxy uses toward the device, which a firewall rule or a BBMD/foreign-
   device table can then key on.

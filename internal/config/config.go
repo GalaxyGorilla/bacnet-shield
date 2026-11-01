@@ -51,11 +51,12 @@ type Config struct {
 // Access is the front-leg policy block. The key names mirror the other
 // Shield projects so one policy vocabulary covers the appliance family.
 type Access struct {
-	Allow       []string     `yaml:"allow"`
-	SCAllow     []string     `yaml:"sc_allow"`
-	RatePerSec  float64      `yaml:"rate_per_sec"`
-	ReadOnly    bool         `yaml:"read_only"`
-	WritePolicy *WritePolicy `yaml:"write_policy"`
+	Allow            []string     `yaml:"allow"`
+	SCAllow          []string     `yaml:"sc_allow"`
+	RatePerSec       float64      `yaml:"rate_per_sec"`
+	DeviceRatePerSec float64      `yaml:"device_rate_per_sec"`
+	ReadOnly         bool         `yaml:"read_only"`
+	WritePolicy      *WritePolicy `yaml:"write_policy"`
 }
 
 // SC is the optional BACnet/SC front leg. An empty block leaves the leg off;
@@ -240,6 +241,7 @@ func (c *Config) AccessPolicy() (*access.Policy, error) {
 		return nil, err
 	}
 	limit := access.NewLimit(c.Access.RatePerSec)
+	budget := access.NewBudget(c.Access.DeviceRatePerSec)
 
 	var write *access.WritePolicy
 	switch {
@@ -261,7 +263,7 @@ func (c *Config) AccessPolicy() (*access.Policy, error) {
 	if err != nil {
 		return nil, err
 	}
-	return access.NewPolicy(list, limit, write).WithSCAllow(scList), nil
+	return access.NewPolicy(list, limit, write).WithSCAllow(scList).WithDeviceBudget(budget), nil
 }
 
 // DeviceObjectID returns the pinned device instance as an object id, if one

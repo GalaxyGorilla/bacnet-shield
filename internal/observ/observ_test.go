@@ -82,6 +82,7 @@ func TestMetricsScrape(t *testing.T) {
 		"bacnet_shield_responses_total",
 		"bacnet_shield_acl_denied_total",
 		"bacnet_shield_rate_limited_total",
+		"bacnet_shield_device_rate_limited_total",
 		"bacnet_shield_writes_denied_total",
 		"bacnet_shield_parse_errors_total",
 		"bacnet_shield_pending_full_total",

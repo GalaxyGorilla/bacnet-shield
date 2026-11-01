@@ -64,6 +64,30 @@ func TestGatewayRateLimit(t *testing.T) {
 	}
 }
 
+func TestGatewayDeviceBudgetBoundsTotalRate(t *testing.T) {
+	dev := newFakeDevice(t, "127.0.0.1")
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 5}
+	// No per-client limit; one shared device token. The first client spends
+	// it and a second, otherwise-innocent client is refused — that is the
+	// proof the budget is per device, not per client.
+	pol := access.NewPolicy(nil, nil, nil).WithDeviceBudget(access.NewBudget(1))
+	f := startGateway(t, Config{DeviceAddr: dev.addr().String()}, pol)
+
+	a := newTestClient(t)
+	a.send(readProperty(7, oid, bacnet.PropertyPresentValue), f.addr())
+	req, _, src := dev.mustRecv(t, time.Second)
+	dev.send(t, readPropertyACK(req.InvokeID, oid, bacnet.PropertyPresentValue, []byte{0x44, 0x3F, 0x80, 0x00, 0x00}), src)
+	a.mustRecv(t, time.Second)
+
+	b := newTestClient(t)
+	b.send(readProperty(7, oid, bacnet.PropertyPresentValue), f.addr())
+	dev.expectNothing(t, 250*time.Millisecond)
+	b.expectNothing(t, 100*time.Millisecond)
+	if got := testutil.ToFloat64(f.metrics.DeviceRateLimited); got != 1 {
+		t.Fatalf("device_rate_limited = %v, want 1", got)
+	}
+}
+
 func TestGatewayWriteDeniedReadOnly(t *testing.T) {
 	dev := newFakeDevice(t, "127.0.0.1")
 	f := startGateway(t, Config{DeviceAddr: dev.addr().String()}, readOnlyPolicy(t))

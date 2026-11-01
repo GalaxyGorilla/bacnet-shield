@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +54,7 @@ log_level: debug
 access:
   allow: ["10.0.0.0/8", "192.0.2.7"]
   rate_per_sec: 25
+  device_rate_per_sec: 20
   write_policy:
     default: deny
     rules:
@@ -72,7 +74,7 @@ metrics:
 	if c.RequestTimeoutSecs != 12 || c.MaxPending != 64 || c.LogLevel != "debug" {
 		t.Fatalf("config = %+v", c)
 	}
-	if len(c.Access.Allow) != 2 || c.Access.RatePerSec != 25 {
+	if len(c.Access.Allow) != 2 || c.Access.RatePerSec != 25 || c.Access.DeviceRatePerSec != 20 {
 		t.Fatalf("access = %+v", c.Access)
 	}
 	if c.Access.WritePolicy == nil || len(c.Access.WritePolicy.Rules) != 2 {
@@ -199,6 +201,7 @@ func TestFlagsBuild(t *testing.T) {
 		"--allow", "10.0.0.0/8",
 		"--allow", "192.0.2.7",
 		"--rate-per-sec", "12.5",
+		"--device-rate-per-sec", "8",
 		"--write-default", "deny",
 		"--write-allow", "analog-value:5:present-value",
 		"--write-deny", "device:*:description",
@@ -224,7 +227,7 @@ func TestFlagsBuild(t *testing.T) {
 	if c.RequestTimeoutSecs != 9 || c.MaxPending != 32 || c.LogLevel != "warn" {
 		t.Fatalf("config = %+v", c)
 	}
-	if len(c.Access.Allow) != 2 || c.Access.RatePerSec != 12.5 {
+	if len(c.Access.Allow) != 2 || c.Access.RatePerSec != 12.5 || c.Access.DeviceRatePerSec != 8 {
 		t.Fatalf("access = %+v", c.Access)
 	}
 	if c.Access.WritePolicy == nil || len(c.Access.WritePolicy.Rules) != 2 ||
@@ -300,6 +303,30 @@ access:
 		Payload: mustHex(t, "0c0080000619553e443f8000003f")}
 	if pol.AllowWrite(other) {
 		t.Fatal("allow rule authorized another instance")
+	}
+}
+
+func TestAccessPolicyDeviceBudget(t *testing.T) {
+	c, err := decode(t, `
+device_addr: 192.0.2.10:47808
+access:
+  device_rate_per_sec: 1
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := c.AccessPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(0, 0)
+	// Two different clients, no per-client limit: the shared device budget is
+	// what refuses the second one.
+	if d := pol.Check(net.ParseIP("10.0.0.1"), now); d != access.Allow {
+		t.Fatalf("first client = %v, want allow", d)
+	}
+	if d := pol.Check(net.ParseIP("10.0.0.2"), now); d != access.DenyDevice {
+		t.Fatalf("second client = %v, want device-budget denial", d)
 	}
 }
 

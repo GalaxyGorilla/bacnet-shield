@@ -30,6 +30,10 @@ func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
 		g.metrics.RateLimited.Inc()
 		g.log.Debug("client denied by rate limit", zap.Stringer("client", src))
 		return
+	case access.DenyDevice:
+		g.metrics.DeviceRateLimited.Inc()
+		g.log.Debug("client denied by the shared device budget", zap.Stringer("client", src))
+		return
 	}
 
 	b, err := bacnet.ParseBVLC(dg)

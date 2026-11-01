@@ -21,6 +21,16 @@ steps, not missing pieces of the documented single-device gateway.
 - Soak tests for the spoofed-source rate-limit flood and steady-state
   forwarding.
 
+## Done — post-v1 (kept for reference)
+
+- Global device budget (B8): an optional shared token bucket
+  (`access.device_rate_per_sec` / `--device-rate-per-sec`) bounds the total
+  request rate toward the one device across all clients, complementing the
+  per-client `rate_per_sec` fairness control. The per-client bucket is charged
+  first, so a rate-denied request never spends the shared budget; both front
+  legs charge the same budget. Denials are silent and counted as
+  `bacnet_shield_device_rate_limited_total`. Reloadable.
+
 ## Open
 
 ### B1 — BACnet/SC front leg
@@ -111,10 +121,10 @@ new functionality.
 
 ### B8 — Global device budget
 
-The current token bucket is per client. Add an optional shared budget so the
-total request rate toward one fragile device is bounded even when many
-legitimate clients poll at once. The per-client limit remains the fairness
-control; the shared limit protects the device.
+DONE. The per-client `rate_per_sec` remains the fairness control; an optional
+shared `access.device_rate_per_sec` bounds the total rate toward the one device.
+See [README.md](README.md#security-controls) and
+[examples/access-control.md](examples/access-control.md).
 
 ### B9 — Structured denial audit
 

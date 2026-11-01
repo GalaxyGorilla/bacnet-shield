@@ -91,7 +91,7 @@ trusted. The instruments that matter operationally:
 |---|---|---|
 | Client traffic | `bacnet_shield_requests_total` | a drop to zero (clients repointed away, or a network change) |
 | Forwarding | `bacnet_shield_forwarded_total`, `bacnet_shield_responses_total` | a widening gap between the two (device not answering) |
-| Policy | `bacnet_shield_acl_denied_total`, `bacnet_shield_rate_limited_total`, `bacnet_shield_writes_denied_total` | a sudden ACL or write-denial spike (misconfigured client, or an incident) |
+| Policy | `bacnet_shield_acl_denied_total`, `bacnet_shield_rate_limited_total`, `bacnet_shield_device_rate_limited_total`, `bacnet_shield_writes_denied_total` | a sudden ACL or write-denial spike (misconfigured client, or an incident); a rising device-budget denial (the pollers together exceed what the device should see) |
 | Device health | `bacnet_shield_pending`, `bacnet_shield_pending_full_total`, `bacnet_shield_parse_errors_total` | `pending` climbing toward `max_pending`; parse errors (a misbehaving peer) |
 | Retransmissions | `bacnet_shield_replayed_total`, `bacnet_shield_retransmits_dropped_total` | a rising dropped count (lossy path or a client retrying during a slow device) |
 | COV | `bacnet_shield_cov_subscriptions`, `bacnet_shield_notifications_dropped_total` | notifications with no subscriber (a client that stopped without cancelling) |

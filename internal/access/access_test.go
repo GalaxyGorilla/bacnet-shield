@@ -2,6 +2,8 @@ package access
 
 import (
 	"net"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -381,5 +383,126 @@ func TestPolicyAllowWritePassthrough(t *testing.T) {
 	p := NewPolicy(nil, nil, nil)
 	if !p.AllowWrite(writeProperty(t, bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 1}, bacnet.PropertyPresentValue)) {
 		t.Fatal("policy without write rules denied a write")
+	}
+}
+
+func TestBudget(t *testing.T) {
+	now := time.Unix(5000, 0)
+	// A non-positive rate disables the budget, and a nil budget allows.
+	if NewBudget(0) != nil || NewBudget(-1) != nil {
+		t.Fatal("non-positive rate must disable the budget")
+	}
+	if !(*Budget)(nil).Allow(now) {
+		t.Fatal("nil budget denied a request")
+	}
+
+	b := NewBudget(2) // burst 2
+	// The first request is admitted immediately: a fresh budget starts full,
+	// unlike a lazily-created per-client bucket that would start empty.
+	for i := 0; i < 2; i++ {
+		if !b.Allow(now) {
+			t.Fatalf("request %d refused inside the burst", i)
+		}
+	}
+	if b.Allow(now) {
+		t.Fatal("third request admitted with an empty device budget")
+	}
+	// Half a second at 2/s refills exactly one token.
+	if !b.Allow(now.Add(500 * time.Millisecond)) {
+		t.Fatal("half a second at 2/s did not refill one token")
+	}
+	if b.Allow(now.Add(500 * time.Millisecond)) {
+		t.Fatal("second request admitted from one refilled token")
+	}
+}
+
+// TestBudgetConcurrent drives the shared bucket from many goroutines with a
+// fixed clock: exactly the burst may pass, no matter the interleaving. Run
+// under -race, this is the mutex's regression test.
+func TestBudgetConcurrent(t *testing.T) {
+	const burst = 100
+	now := time.Unix(6000, 0)
+	b := NewBudget(burst)
+
+	const goroutines = 32
+	const perGoroutine = 200
+
+	var wg sync.WaitGroup
+	var allowed int64
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				if b.Allow(now) {
+					atomic.AddInt64(&allowed, 1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if allowed != burst {
+		t.Fatalf("allowed = %d, want exactly the burst %d at a frozen clock", allowed, burst)
+	}
+}
+
+// TestPolicyDeviceBudget: the shared budget bounds the total rate toward the
+// device across clients, while each client keeps its own per-client bucket.
+func TestPolicyDeviceBudget(t *testing.T) {
+	now := time.Unix(7000, 0)
+	a := net.ParseIP("192.0.2.1")
+	b := net.ParseIP("192.0.2.2")
+	c := net.ParseIP("192.0.2.3")
+
+	// Per-client limit 1, shared device budget 2. A spends its own token and
+	// one budget token; its second, rate-denied request must NOT spend the
+	// second budget token, so B still gets one; then the budget is empty.
+	p := NewPolicy(nil, NewLimit(1), nil).WithDeviceBudget(NewBudget(2))
+	if d := p.Check(a, now); d != Allow {
+		t.Fatalf("A first request = %v, want allow", d)
+	}
+	if d := p.Check(a, now); d != DenyRate {
+		t.Fatalf("A second request = %v, want rate denial (its own bucket)", d)
+	}
+	if d := p.Check(b, now); d != Allow {
+		t.Fatalf("B request = %v, want allow (a rate denial must not spend the device budget)", d)
+	}
+	if d := p.Check(c, now); d != DenyDevice {
+		t.Fatalf("C request = %v, want device-budget denial", d)
+	}
+}
+
+// TestPolicyDeviceBudgetACLFirst: an off-list client never spends the shared
+// device budget, exactly as it never spends a per-client token.
+func TestPolicyDeviceBudgetACLFirst(t *testing.T) {
+	now := time.Unix(8000, 0)
+	list, err := NewList([]string{"10.0.0.0/8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewPolicy(list, nil, nil).WithDeviceBudget(NewBudget(1))
+	for i := 0; i < 3; i++ {
+		if d := p.Check(net.ParseIP("203.0.113.5"), now); d != DenyACL {
+			t.Fatalf("off-list request %d = %v, want ACL denial", i, d)
+		}
+	}
+	// The budget must still have its one token for an allowed client.
+	if d := p.Check(net.ParseIP("10.0.0.1"), now); d != Allow {
+		t.Fatalf("in-list request = %v, want allow (off-list traffic spent the budget)", d)
+	}
+}
+
+// TestPolicyDeviceBudgetSharedAcrossLegs: the IP and SC front legs spend the
+// same device budget, so an SC node cannot bypass the IP leg's total.
+func TestPolicyDeviceBudgetSharedAcrossLegs(t *testing.T) {
+	now := time.Unix(9000, 0)
+	vmac := sc.MAC{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
+	p := NewPolicy(nil, nil, nil).WithSCAllow(nil).WithDeviceBudget(NewBudget(1))
+
+	if d := p.Check(net.ParseIP("192.0.2.1"), now); d != Allow {
+		t.Fatalf("IP request = %v, want allow", d)
+	}
+	if d := p.CheckSC(vmac, now); d != DenyDevice {
+		t.Fatalf("SC request = %v, want the shared device-budget denial", d)
 	}
 }
