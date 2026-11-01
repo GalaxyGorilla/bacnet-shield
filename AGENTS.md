@@ -196,10 +196,12 @@ file to re-read and the flags came from the command line.
   `BACNET_SHIELD_SOAK_DURATION` (default 10m). They assert bounded tables,
   flat goroutines/heap and zero unanswered requests.
 - **Independent peer**: `make peers` provisions bacpypes3 0.0.110 in `.venv`;
-  `make interop` drives the built binary on both IP legs. `make sc-hub-image`
+  `make interop` drives the built binary on both IP legs, including a COV
+  subscription whose notification is triggered by a write. `make sc-hub-image`
   builds bacnet-stack 1.6.1's `sc-hub` + BSC clients in Docker; `make
-  interop-sc` drives the built binary as a node of that hub. Exit 77 means the
-  peer is absent, not that the product failed.
+  interop-sc` drives the built binary as a node of that hub, including a
+  bacnet-stack COV subscriber. Exit 77 means the peer is absent, not that the
+  product failed.
 - Do not run two full test suites concurrently; fixed ports in the interop
   scripts will collide and look like a product bind error (`interop-sc` also
   binds host port 50050).
@@ -238,12 +240,14 @@ Done in v1:
   write denial with the tagged Error PDU, replay across the leg boundary, COV
   notification routing and I-Am fan-out.
 - bacpypes3 interop: read, Who-Is, denied write, SIGHUP reload to an allowed
-  write, uncovered write still denied, read-back of the written value.
+  write, uncovered write still denied, read-back of the written value, and a
+  COV subscription that receives the notification from the client's write.
 - bacnet-stack SC interop (`make interop-sc`): the proxy joins bacnet-stack
   1.6.1's `sc-hub` in Docker as a node, and bacnet-stack's own BSC clients
   drive Who-Is, a read, a denied write (tagged Error PDU over SC), a SIGHUP
-  reload to a scoped policy, an allowed write and a read-back. This found the
-  originating-VMAC defect recorded in `CONFORMANCE.md`.
+  reload to a scoped policy, an allowed write, a read-back, and a COV
+  subscriber that receives the initial and the change-triggered notification.
+  This found the originating-VMAC defect recorded in `CONFORMANCE.md`.
 
 Known boundaries:
 

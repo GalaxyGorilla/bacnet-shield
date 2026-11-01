@@ -30,12 +30,14 @@ bacpypes3 is missing.
 
 The peer applications are real `bacpypes3` applications:
 
-- `scripts/interop_device.py` — a device object plus two `AnalogValueObject`s.
-  It answers Who-Is, ReadProperty and WriteProperty through the normal
-  bacpypes3 application service.
+- `scripts/interop_device.py` — a device object plus two local analog-value
+  objects that report COV on a write (see Finding 2). It answers Who-Is,
+  ReadProperty and WriteProperty through the normal bacpypes3 application
+  service.
 - `scripts/interop_client.py` — a normal bacpypes3 client. It sends
-  ReadProperty and WriteProperty, decodes the answers (including Error PDUs)
-  and exits non-zero when the observed behavior differs from the policy.
+  ReadProperty and WriteProperty, subscribes for COV, decodes the answers
+  (including Error PDUs) and exits non-zero when the observed behavior differs
+  from the policy.
 
 `scripts/interop-bacnet.sh` starts both around the built
 `bin/bacnet-shield` binary, so the proxy is exercised on both legs:
@@ -67,6 +69,7 @@ bacnet-stack BSC client that is a second node of the same hub:
 | `SIGHUP` policy reload | A real client observes the policy change in place; the gateway does not restart |
 | Write allowed after reload | The write is acknowledged by the third-party device and the new value is read back |
 | Write still denied for an uncovered object | The allow rule covers exactly one target; a sibling object is still refused |
+| COV subscription and notification | A third-party client subscribes, changes the monitored value with a write, and receives the device's notification back through the proxy — proving subscriber routing, not broadcast, on the IP leg |
 
 The SC interop run repeats the IP-leg scenarios across the secure leg at the
 wire level:
@@ -81,6 +84,7 @@ wire level:
 | `SIGHUP` reload to a scoped policy | The policy swap happens without dropping the hub connection |
 | Write allowed after reload, sibling still denied, read-back | The scoped rule covers exactly its target and the value round-trips |
 | Hub restart | The node detects the lost connection, re-attaches to the hub, and serves the next request; the device value is unchanged across the restart |
+| COV over SC | A bacnet-stack subscriber receives the subscription's initial notification and a second notification after the value changes, so the device-originated notification is routed by the proxy to the SC subscriber's VMAC over the hub rather than broadcast |
 
 Wire formats were cross-checked against the bacpypes3 source for the parts
 the proxy parses or emits: BVLC functions and length semantics, NPDU control
@@ -127,6 +131,14 @@ find: our own decoder happily round-tripped the same wrong bytes.
   context-3 opening/closing tags around the application REAL. The client
   unwraps the application tags and decodes the REAL; this is a property of the
   oracle's object model, not a difference in the wire format.
+- bacpypes3's local `Object.write_property` writes through
+  `super().__setattr__`, which skips the property monitors that drive COV, so a
+  BACnet WriteProperty to a local object changes the value but originates no
+  notification. A real device notifies on a change, and the proxy's subscriber
+  routing is the behavior under test, so `scripts/interop_device.py` routes the
+  ordinary write through `__setattr__` (see `CovAnalogValueObject`). This is a
+  fixture adjustment in the peer application; the bytes on the wire stay
+  standard and the proxy is unchanged.
 
 No vendor divergence was adapted away in the proxy. Service payloads remain
 opaque; the proxy never rewrites a value to satisfy a peer.
@@ -177,9 +189,12 @@ the log line is the whole response.
   the Python peer. Generating a genuinely segmented answer from a real
   bacpypes3 device needs a payload large enough to force segmentation; that is
   backlog work.
-- **No COV interop scenario yet.** COV subscription, cancellation, expiry and
-  fan-out are pinned by in-process tests. The Python device could originate
-  notifications, but the current interop driver does not exercise them.
+- **COV interop is single-object and driver-triggered.** The Python client
+  exercises `SubscribeCOV` and an unconfirmed notification, and the SC run
+  drives `SubscribeCOV` through a bacnet-stack subscriber; multi-object
+  (`SubscribeCOVPropertyMultiple`, refused by design), confirmed-notification
+  interop, and subscription expiry across a long run are pinned by in-process
+  tests only.
 - **No BACnet/SC direct (node-to-node) interop.** The proxy attaches to a hub,
   which is the v1 shape. Direct connections are out of scope; see
   [BACKLOG.md](BACKLOG.md).

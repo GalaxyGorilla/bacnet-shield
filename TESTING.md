@@ -15,7 +15,7 @@ local `make` target.
 | COV | Subscription install after ACK, rejected subscription not routed, cancellation, expiry, multi-client fan-out, unroutable confirmed notification |
 | Segments | Segmented responses and device requests relayed with per-invoke tracking; segmented writes denied |
 | Lifecycle | Config validation, reload, restart-only warnings, invalid reload, shutdown, systemd readiness and watchdog; SC config validation and TLS file errors |
-| Independent peer | bacpypes3 0.0.110 drives the built binary as both client and device; BVLL-SC golden bytes come from the same peer; bacnet-stack 1.6.1's `sc-hub` + BSC clients drive the built binary over BACnet/SC (`make interop-sc`) |
+| Independent peer | bacpypes3 0.0.110 drives the built binary as both client and device; BVLL-SC golden bytes come from the same peer; bacnet-stack 1.6.1's `sc-hub` + BSC clients drive the built binary over BACnet/SC (`make interop-sc`), including a COV subscriber |
 | Soak | Spoofed-source rate-limit flood; steady-state forwarding with flat goroutines/heap and zero unanswered requests |
 
 ## Commands
@@ -103,7 +103,10 @@ gateway, and drives:
 3. a write refused by a read-only policy (Error 4/40);
 4. a `SIGHUP` policy reload;
 5. the same write now allowed (ACK and read-back of the new value);
-6. an uncovered write still denied.
+6. an uncovered write still denied;
+7. a COV subscription that receives the initial notification and then the
+   change from the client's own write, proving the device-originated
+   notification is routed back to the subscriber.
 
 `scripts/interop_client.py` and `scripts/interop_device.py` are real
 bacpypes3 applications, not protocol mocks. See
@@ -125,7 +128,10 @@ builds bacnet-stack 1.6.1's hub (`bacschub`) and BSC clients (`bacwi`, `bacrp`,
    write and a read-back over BACnet/SC with a bacnet-stack client that is a
    second node of the same hub;
 5. restarts the hub container and checks the node re-attaches and keeps
-   serving.
+   serving;
+6. subscribes a bacnet-stack COV client to the device over SC and asserts it
+   receives both the initial notification and the one triggered by a write —
+   device-originated routing to the subscriber's VMAC through the hub.
 
 This is the one run where the SC transport (which this project owns) talks to a
 third-party implementation. It found the originating-VMAC defect recorded in

@@ -91,11 +91,12 @@ segment. A later version could reassemble the APDU, authorize all targets,
 and forward the original segments unchanged. Until then, fail-closed is the
 correct behavior and the cost is the rare large segmented write.
 
-### B6 — Real segmented and COV interop
+### B6 — Real segmented interop
 
-Extend the bacpypes3 driver to force a segmented response and to originate
-COV notifications from the Python device. Today those paths are pinned by
-in-process tests only; see [CONFORMANCE.md](CONFORMANCE.md).
+Extend the bacpypes3 driver to force a segmented response and a
+device-initiated segmented request. Today those paths are pinned by in-process
+tests only; see [CONFORMANCE.md](CONFORMANCE.md). (COV interop — subscription
+and a device-originated notification on both legs — is covered now.)
 
 ### B7 — Physical commissioning matrix
 

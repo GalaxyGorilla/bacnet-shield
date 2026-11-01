@@ -7,10 +7,10 @@ and target come from the environment so SimpleArgumentParser's own arguments
 stay reserved for the local bind address:
 
     BACNET_TARGET   proxy address, e.g. 127.0.0.1:47811
-    BACNET_OP       read | write | write-denied | whois
+    BACNET_OP       read | write | write-denied | whois | cov
     BACNET_OID      object identifier, default analog-value,1
     BACNET_PROP     property identifier, default present-value
-    BACNET_VALUE    value for write, default 2.5
+    BACNET_VALUE    value for write/cov, default 2.5
 """
 
 import asyncio
@@ -115,6 +115,52 @@ async def run(app: Application, target: Address) -> int:
         for i_am in i_ams:
             print(f"i-am {i_am.iAmDeviceIdentifier} from {i_am.pduSource}")
         return 0
+
+    if op == "cov":
+        # Subscribe to the monitored object, change it, and wait for the
+        # notification to come back through the proxy. Unconfirmed
+        # notifications keep the exchange one-way past the device, which is
+        # what a real COV consumer uses.
+        value = float(os.environ.get("BACNET_VALUE", "2.5"))
+        async with app.change_of_value(
+            target,
+            oid,
+            subscriber_process_identifier=1,
+            issue_confirmed_notifications=False,
+            lifetime=60,
+        ) as scm:
+            req = WritePropertyRequest(
+                objectIdentifier=oid,
+                propertyIdentifier=prop,
+                propertyValue=Real(value),
+                destination=target,
+            )
+            resp = await _request(app, req)
+            if isinstance(resp, ErrorRejectAbortNack):
+                return _fail(f"cov trigger write returned {resp!r}")
+            # A subscription delivers an initial notification carrying the
+            # value from before the write, so drain until the changed value
+            # arrives (or the deadline passes).
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + 8.0
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                try:
+                    pv = await asyncio.wait_for(scm.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+                if pv.propertyIdentifier != prop:
+                    # A notification for an analog value may carry more than
+                    # one property (status-flags alongside present-value);
+                    # only the monitored property is the one under test.
+                    continue
+                got = _real(pv.value)
+                if got == value:
+                    print(f"cov {oid} {prop} = {got}")
+                    return 0
+        return _fail(f"no COV notification with the changed value {value}")
 
     return _fail(f"unknown BACNET_OP {op!r}")
 

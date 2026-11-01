@@ -228,4 +228,19 @@ wait_for_count "$gw_log" "attached to hub" "$((attached_before + 1))" 300 ||
 after="$(bsc bacrp 1001 analog-value 1 present-value)" || fail "read after hub restart failed"
 echo "$after" | grep -q "3.500000" || fail "value changed across a hub restart (got: $after)"
 
+echo "== COV: an SC subscriber receives the device's notifications through the proxy"
+cov_log="$tmp/cov.log"
+# The subscriber is a third bacnet-stack SC node. It prints one line per
+# notification; the first is the subscription's initial value, the second is
+# the change we trigger below. Receiving the second proves the proxy routed the
+# device-originated notification to the SC subscriber (it is not broadcast).
+bsc bacscov 1001 analog-value 1 1 unconfirmed 60 >"$cov_log" 2>&1 &
+cov_pid=$!
+pids="$pids $cov_pid"
+wait_for "$cov_log" "Received Notification" 50 || fail "COV subscription over SC (got: $(cat "$cov_log"))"
+bsc bacwp 1001 analog-value 1 present-value 0 -1 4 6.5 >/dev/null || fail "COV trigger write"
+wait_for_count "$cov_log" "Received Notification" 2 100 ||
+	fail "no COV notification for the change over SC (got: $(cat "$cov_log"))"
+docker exec "$HUB_NAME" pkill -f bacscov >/dev/null 2>&1 || true
+
 echo "interop-sc ok"

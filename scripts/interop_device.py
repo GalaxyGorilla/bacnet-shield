@@ -18,23 +18,47 @@ from bacpypes3.app import Application
 from bacpypes3.local.analog import AnalogValueObject
 
 
+class CovAnalogValueObject(AnalogValueObject):
+    """An analog value that reports COV on a write, like a real device.
+
+    bacpypes3's local ``Object.write_property`` writes through
+    ``super().__setattr__`` and so skips the property monitors that drive
+    COV detection: a WriteProperty changes the value but never produces a
+    notification. A real device notifies on a change, and the proxy's
+    subscriber routing is exactly what the interop is meant to exercise, so
+    route the ordinary (non-array, non-priority) write through ``__setattr__``
+    where the monitors run. This is a fixture adjustment, not a proxy
+    adaptation; the wire on both sides stays standard.
+    """
+
+    async def write_property(self, attr, value, index=None, priority=None):
+        if isinstance(attr, int):
+            attr = self._property_identifier_class(attr).attr
+        if index is None and priority is None:
+            setattr(self, attr, value)
+            return
+        await super().write_property(attr, value, index, priority)
+
+
 async def main() -> int:
     parser = SimpleArgumentParser(description="bacnet-shield interop device")
     args = parser.parse_args()
     app = Application.from_args(args)
 
     app.add_object(
-        AnalogValueObject(
+        CovAnalogValueObject(
             objectIdentifier=("analog-value", 1),
             objectName="AV-1",
             presentValue=1.0,
+            covIncrement=0.0,
         )
     )
     app.add_object(
-        AnalogValueObject(
+        CovAnalogValueObject(
             objectIdentifier=("analog-value", 2),
             objectName="AV-2",
             presentValue=2.0,
+            covIncrement=0.0,
         )
     )
 

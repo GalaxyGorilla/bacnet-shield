@@ -100,10 +100,10 @@ EOF
 }
 
 run_client() {
-	# run_client <op> [oid] [prop] [expected-value]
+	# run_client <op> [oid] [prop] [expected-value] [write-value]
 	BACNET_TARGET="$PROXY_ADDR" BACNET_OP="$1" \
 		BACNET_OID="${2:-analog-value,1}" BACNET_PROP="${3:-present-value}" \
-		BACNET_EXPECT="${4:-}" \
+		BACNET_EXPECT="${4:-}" BACNET_VALUE="${5:-2.5}" \
 		"$PY" scripts/interop_client.py --address 127.0.0.1:0
 }
 
@@ -136,5 +136,11 @@ run_client write-denied analog-value,2 present-value || fail "uncovered write"
 
 echo "== read back the written value"
 run_client read analog-value,1 present-value 2.5 || fail "read-back"
+
+echo "== COV: subscribe, change, and receive the notification through the proxy"
+run_client cov analog-value,1 present-value "" 4.25 || fail "cov notification"
+
+echo "== read back the COV-changed value"
+run_client read analog-value,1 present-value 4.25 || fail "cov read-back"
 
 echo "interop ok"
