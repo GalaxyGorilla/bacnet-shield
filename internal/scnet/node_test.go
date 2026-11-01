@@ -379,6 +379,48 @@ func TestNodeStateHandler(t *testing.T) {
 	}
 }
 
+// TestNodeStateHandlerReconnect: a hub drop must be reported as disconnected
+// and the re-attach as connected again, in order, so the connected gauge falls
+// to 0 during the outage and rises again instead of sticking at 1.
+func TestNodeStateHandlerReconnect(t *testing.T) {
+	h := newTestHub(t)
+	n := testNode(t, h, NodeConfig{})
+
+	connected := make(chan struct{}, 8)
+	disconnected := make(chan struct{}, 8)
+	n.SetStateHandler(func(up bool, hub string) {
+		if up {
+			connected <- struct{}{}
+		} else {
+			disconnected <- struct{}{}
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = n.Run(ctx) }()
+
+	hc := h.waitConn(t, 3*time.Second)
+	waitState(t, connected, "initial connect")
+	waitConnected(t, n, 3*time.Second)
+
+	// The hub drops the connection. The node must report the loss...
+	_ = hc.c.Close()
+	waitState(t, disconnected, "disconnect after the hub dropped")
+	// ...and then report the re-attach once it is serving again.
+	waitState(t, connected, "reconnect")
+	waitConnected(t, n, 3*time.Second)
+}
+
+func waitState(t *testing.T, ch chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("no state transition: %s", what)
+	}
+}
+
 func TestNodeFiltersInboundNPDUs(t *testing.T) {
 	h := newTestHub(t)
 	n := testNode(t, h, NodeConfig{})
