@@ -30,6 +30,18 @@ BVLC-SC (`0x82`), hub/route handling. This is the reason the project does not
 grow a private PSK tunnel: the secure leg should be a standard boundary that
 other BACnet stacks can join.
 
+Done: BVLL-SC codec (`internal/bacnet/sc`), golden-byte cross-checked against
+bacpypes3 and bacnet-stack, with a fuzz target.
+
+Shape decisions: the proxy is an SC **node** attaching to an existing hub
+(primary + failover), not a hub; client admission is an opt-in VMAC/UUID
+allow-list (default accepts whatever the hub delivers, gated only by the write
+policy); the independent SC peer is bacnet-stack's `sc-hub` via Docker.
+
+Remaining: WebSocket transport over TLS 1.3, the connect/heartbeat/reconnect
+state machine, the front-leg abstraction that lets SC clients reuse the
+existing pending/replay/write-policy machinery, and the interop scenario.
+
 Work includes certificate/CA configuration, SC hub connection state,
 address-to-client mapping (SC nodes are not identified by IP:port), and an
 interop scenario against an independent SC implementation. The clear device

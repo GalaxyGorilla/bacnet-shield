@@ -39,7 +39,8 @@ rewritten, and only the front-leg policy can reject a request.
 | Denial shape | ACL/rate denials are silent. A refused write gets Error class `security` (4) / code `write-access-denied` (40). Unsupported subscriptions get class `services` (5) / code `service-request-denied` (29). An unroutable confirmed COV gets code `unknown-subscription` (79) |
 | COV | Track `SubscribeCOV` and `SubscribeCOVProperty` (one monitored object each). Install only after a SimpleACK. `SubscribeCOVPropertyMultiple` is refused |
 | Config changes | `SIGHUP` re-reads `--config` and swaps only the access policy. Listener/device/timeout/log/metrics changes are reported as restart-only warnings. Invalid reload keeps the running policy |
-| Secure front leg | BACnet/SC (TLS 1.3 + WebSocket, BVLC-SC `0x82`) is the planned standard path. A private PSK tunnel is explicitly rejected |
+| Secure front leg | BACnet/SC (TLS 1.3 + WebSocket, BVLC-SC `0x82`). The proxy is an SC **node** that attaches to an existing hub (primary + failover), not a hub itself. A private PSK tunnel is explicitly rejected |
+| SC client admission | Opt-in SC allow-list keyed by VMAC/UUID. With none configured, any node the hub delivers is accepted and only the write policy gates it (same "protection is opt-in" shape as the IP leg) |
 | Ground truth | ASHRAE 135 wire formats, cross-checked against **bacpypes3 0.0.110** in `.venv`. Vendor divergence is reported in [CONFORMANCE.md](CONFORMANCE.md), never silently adapted away in the proxy |
 | No CI | Deliberate user decision across the Shield projects. Gates are local `make` targets |
 
@@ -48,6 +49,7 @@ rewritten, and only the front-leg policy can reject a request.
 ```
 cmd/bacnet-shield/     CLI: gateway | validate | selftest | version | help
 internal/bacnet/       Wire codecs (BVLC, NPDU, APDU, tags, object IDs, services)
+internal/bacnet/sc/    BACnet/SC virtual link layer (BVLL-SC) codec
 internal/access/       Allow-list, token bucket, write policy
 internal/config/       YAML + flags, validation, access-policy compilation
 internal/proxy/        Data plane: routing, invoke IDs, COV, firmware probe
@@ -140,8 +142,13 @@ file to re-read and the flags came from the command line.
 - **Test volume is fine** — 10× the operational code is acceptable when the
   suite is structured and maintainable. Share fixtures (`harness_test.go`)
   instead of copying them.
-- **Fuzz targets** live in `internal/bacnet/fuzz_test.go`. Every parser entry
-  point has one; a crash is a bug, not a corpus entry to hide.
+- **Fuzz targets** live in `internal/bacnet/fuzz_test.go` and, for the SC
+  codec, `internal/bacnet/sc/fuzz_test.go`. Every parser entry point has one; a
+  crash is a bug, not a corpus entry to hide.
+- **Oracle golden bytes** for the SC codec come from bacpypes3
+  (`scripts/sc-golden.py`, cross-checked against bacnet-stack's `bvlc-sc.c`).
+  Regenerate and compare with `internal/bacnet/sc/sc_test.go` when a peer
+  reports a divergence; record it in `CONFORMANCE.md`.
 - **Soak tests** are opt-in: `make soak` sets `BACNET_SHIELD_SOAK=1` and
   `BACNET_SHIELD_SOAK_DURATION` (default 10m). They assert bounded tables,
   flat goroutines/heap and zero unanswered requests.
@@ -167,6 +174,10 @@ Done in v1:
 - Device source validation with a learned source port.
 - CLI, config validation, `SIGHUP` reload, systemd watchdog, selftest probe.
 - Metrics, logger, panic isolation, soak tests.
+- BVLL-SC codec (`internal/bacnet/sc`): header/options and all node↔hub
+  message bodies, golden-byte cross-checked against bacpypes3, own fuzz target.
+  The transport (TLS 1.3 + WebSocket) and the connect/heartbeat state machine
+  are the next step; see [BACKLOG.md](BACKLOG.md) B1.
 - bacpypes3 interop: read, Who-Is, denied write, SIGHUP reload to an allowed
   write, uncovered write still denied, read-back of the written value.
 

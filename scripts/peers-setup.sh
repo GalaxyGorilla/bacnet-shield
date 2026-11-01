@@ -27,4 +27,11 @@ if ! .venv/bin/pip install --quiet 'bacpypes3==0.0.110'; then
 	exit 77
 fi
 
+# bacpypes3's sc package (the BVLC-SC golden-vector oracle) imports websockets
+# even for the pure codec. The live SC peer is bacnet-stack's sc-hub, not this.
+if ! .venv/bin/pip install --quiet websockets; then
+	echo "pip install websockets failed (exit 77)"
+	exit 77
+fi
+
 "$PY" -c 'import bacpypes3; print("bacpypes3", bacpypes3.__version__, "installed")'
