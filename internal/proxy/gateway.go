@@ -1,0 +1,382 @@
+// Package proxy is the BACnet/IP retrofit gateway: the single box between a
+// building's clients and one legacy device.
+//
+//	[N clients] --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [legacy device]
+//
+// The proxy is not a BACnet device stack and does not translate services. It
+// decodes just enough of the link, network and application layers to route a
+// request to the device, correlate the answer back to the client that asked,
+// and enforce the front-leg policy (ACL, rate limit, write rules). The service
+// payload itself is forwarded byte for byte, so vendor quirks survive.
+//
+// Two pieces of state make the single-device model work:
+//
+//   - invoke-ID translation: every client has its own one-octet invoke-ID
+//     space, so two clients may have request 7 in flight at once. The proxy
+//     allocates a device-leg ID per client request and rewrites the octet in
+//     place on the way out and back.
+//   - COV subscriber tracking: a SubscribeCOV forwarded from the proxy's
+//     device socket makes the device notify the proxy. The proxy remembers
+//     which client asked for which monitored object and forwards the
+//     notification to that client.
+//
+// Everything else is deliberately pass-through. In particular the proxy never
+// caches property values: a read always reaches the device, because a stale
+// setpoint in a building is worse than a slow one.
+package proxy
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/GalaxyGorilla/bacnet-shield/internal/access"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/observ"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/safego"
+)
+
+// Config is the gateway's runtime shape. The command layer maps the YAML/flags
+// config onto it; the proxy does not read files.
+type Config struct {
+	// ListenAddr is the client leg. ":47808" is the BACnet/IP port.
+	ListenAddr string
+	// DeviceAddr is the one legacy device on the clear leg. It must be a
+	// unicast IPv4 address: the proxy accepts device-leg datagrams only from
+	// this host.
+	DeviceAddr string
+	// DeviceLocalAddr optionally pins the source address of the device leg.
+	// Empty means an ephemeral port, which is what a BACnet client uses.
+	DeviceLocalAddr string
+	// RequestTimeout bounds how long a forwarded request stays pending.
+	RequestTimeout time.Duration
+	// MaxPending caps in-flight client requests (1..256; the invoke ID is
+	// one octet).
+	MaxPending int
+	// DeviceInstance optionally pins the expected device instance. It never
+	// gates traffic; a mismatch is a warning (and a selftest failure).
+	DeviceInstance *uint32
+}
+
+const (
+	// clientIdle is how long a client stays in the active table for
+	// unsolicited notifications (I-Am, events). It is longer than a typical
+	// poll interval so a quiet workstation still receives broadcasts.
+	clientIdle = 5 * time.Minute
+	// maxClients bounds the active table. It is a table of addresses that
+	// have already passed the ACL, so it is not attacker-controlled in the
+	// same way the rate-limit table is; the cap is still a hard backstop.
+	maxClients = 1024
+	// completedTTL is how long a finished response is replayed to a
+	// retransmitted request. BACnet's APDU retry timer is seconds, not
+	// minutes; 30s covers a lossy building network without holding state.
+	completedTTL = 30 * time.Second
+	// maxCompleted bounds the replay cache.
+	maxCompleted = 2048
+	// segmentGrace keeps a completed segmented exchange routable for the
+	// client's final SegmentACK.
+	segmentGrace = 10 * time.Second
+	// sweepInterval is the expiry cadence. One second is cheap at the table
+	// sizes above and keeps a dead request from occupying an invoke ID for
+	// noticeably longer than its deadline.
+	sweepInterval = time.Second
+	// maxSubscriptions bounds the COV routing table. A client can create
+	// subscriptions for arbitrary object identifiers; without a cap, a
+	// hostile client with an ACK-happy device could grow the table without
+	// bound. At the cap new subscriptions are accepted by the device but
+	// not routed, and the client sees no notifications (the same visible
+	// result as a device that never notifies).
+	maxSubscriptions = 4096
+)
+
+// Gateway is one running proxy instance.
+type Gateway struct {
+	cfg     Config
+	log     *zap.Logger
+	metrics *observ.Metrics
+	policy  atomic.Pointer[access.Policy]
+
+	clientConn *net.UDPConn
+	deviceConn *net.UDPConn
+	deviceAddr *net.UDPAddr
+	deviceIP   net.IP
+
+	mu         sync.Mutex
+	pending    map[byte]*pendingReq     // device invoke ID -> client request
+	byClient   map[clientKey]byte       // (client, client ID) -> device ID
+	done       map[clientKey]*completed // finished response replay cache
+	usedIDs    [4]uint64                // device invoke IDs in use
+	fromDevice map[byte]*deviceExchange // device invoke ID -> forwarded client request
+	toDevice   map[clientKey]byte       // (client, client ID) -> device ID
+	clients    map[string]*clientState
+	cov        map[bacnet.ObjectID]map[covSubKey]*subscription
+	subCount   int
+
+	closeOnce sync.Once
+	wg        sync.WaitGroup
+}
+
+// New resolves the device, binds both legs, and returns a gateway ready for
+// Serve. Binding here (not in Serve) makes a port conflict a startup error
+// instead of a goroutine that dies quietly.
+func New(cfg Config, pol *access.Policy, log *zap.Logger, m *observ.Metrics) (*Gateway, error) {
+	if log == nil {
+		log = zap.NewNop()
+	}
+	if m == nil {
+		m = observ.NewMetrics()
+	}
+	if cfg.RequestTimeout <= 0 {
+		cfg.RequestTimeout = 30 * time.Second
+	}
+	if cfg.MaxPending <= 0 || cfg.MaxPending > 256 {
+		return nil, fmt.Errorf("proxy: max_pending %d outside 1..256", cfg.MaxPending)
+	}
+	deviceAddr, err := net.ResolveUDPAddr("udp4", cfg.DeviceAddr)
+	if err != nil {
+		return nil, fmt.Errorf("proxy: device address %q: %w", cfg.DeviceAddr, err)
+	}
+	if deviceAddr.IP == nil || deviceAddr.IP.To4() == nil {
+		return nil, fmt.Errorf("proxy: device address %q is not IPv4 (BACnet/IPv6 is not supported)", cfg.DeviceAddr)
+	}
+	listenAddr, err := net.ResolveUDPAddr("udp4", cfg.ListenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("proxy: listen address %q: %w", cfg.ListenAddr, err)
+	}
+	clientConn, err := net.ListenUDP("udp4", listenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("proxy: bind client leg %q: %w", cfg.ListenAddr, err)
+	}
+	var local *net.UDPAddr
+	if cfg.DeviceLocalAddr != "" {
+		local, err = net.ResolveUDPAddr("udp4", cfg.DeviceLocalAddr)
+		if err != nil {
+			_ = clientConn.Close()
+			return nil, fmt.Errorf("proxy: device local address %q: %w", cfg.DeviceLocalAddr, err)
+		}
+	}
+	deviceConn, err := net.ListenUDP("udp4", local)
+	if err != nil {
+		_ = clientConn.Close()
+		return nil, fmt.Errorf("proxy: bind device leg: %w", err)
+	}
+	g := &Gateway{
+		cfg:        cfg,
+		log:        log,
+		metrics:    m,
+		clientConn: clientConn,
+		deviceConn: deviceConn,
+		deviceAddr: deviceAddr,
+		deviceIP:   deviceAddr.IP.To4(),
+		pending:    make(map[byte]*pendingReq),
+		byClient:   make(map[clientKey]byte),
+		done:       make(map[clientKey]*completed),
+		fromDevice: make(map[byte]*deviceExchange),
+		toDevice:   make(map[clientKey]byte),
+		clients:    make(map[string]*clientState),
+		cov:        make(map[bacnet.ObjectID]map[covSubKey]*subscription),
+	}
+	g.policy.Store(pol)
+	return g, nil
+}
+
+// ClientAddr is the bound client-leg address. Tests use it with ":0"; the
+// command uses it for the readiness log.
+func (g *Gateway) ClientAddr() *net.UDPAddr {
+	return g.clientConn.LocalAddr().(*net.UDPAddr)
+}
+
+// DeviceLocalAddr is the bound source address of the device leg.
+func (g *Gateway) DeviceLocalAddr() *net.UDPAddr {
+	return g.deviceConn.LocalAddr().(*net.UDPAddr)
+}
+
+// SetPolicy swaps the front-leg policy. It is safe while Serve is running;
+// a SIGHUP reload uses it.
+func (g *Gateway) SetPolicy(p *access.Policy) { g.policy.Store(p) }
+
+// Serve runs both read loops until ctx is cancelled, then closes the sockets.
+// A bind error is reported by New, so Serve only returns after shutdown.
+func (g *Gateway) Serve(ctx context.Context) error {
+	g.wg.Add(3)
+	safego.Go(g.log, "gateway client loop", func() { defer g.wg.Done(); g.clientLoop(ctx) })
+	safego.Go(g.log, "gateway device loop", func() { defer g.wg.Done(); g.deviceLoop(ctx) })
+	safego.Go(g.log, "gateway sweeper", func() { defer g.wg.Done(); g.sweepLoop(ctx) })
+
+	<-ctx.Done()
+	g.Close()
+	g.wg.Wait()
+	return nil
+}
+
+// Close closes both sockets. It is idempotent.
+func (g *Gateway) Close() error {
+	var err error
+	g.closeOnce.Do(func() {
+		err = errors.Join(g.clientConn.Close(), g.deviceConn.Close())
+	})
+	return err
+}
+
+func (g *Gateway) clientLoop(ctx context.Context) {
+	buf := make([]byte, 65535)
+	for {
+		n, src, err := g.clientConn.ReadFromUDP(buf)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			g.log.Warn("client leg read", zap.Error(err))
+			continue
+		}
+		dg := buf[:n]
+		safego.Dispatch(g.log, "gateway client datagram", func() { g.handleClient(dg, src) })
+	}
+}
+
+func (g *Gateway) deviceLoop(ctx context.Context) {
+	buf := make([]byte, 65535)
+	for {
+		n, src, err := g.deviceConn.ReadFromUDP(buf)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			g.log.Warn("device leg read", zap.Error(err))
+			continue
+		}
+		dg := buf[:n]
+		safego.Dispatch(g.log, "gateway device datagram", func() { g.handleDevice(dg, src) })
+	}
+}
+
+func (g *Gateway) sweepLoop(ctx context.Context) {
+	t := time.NewTicker(sweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			g.sweep(now)
+		}
+	}
+}
+
+// sweep expires pending requests, replay entries, device-initiated requests,
+// subscriptions and idle clients. All tables are bounded; this is what keeps
+// them bounded over a long run.
+func (g *Gateway) sweep(now time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	for id, p := range g.pending {
+		if now.After(p.deadline) {
+			g.dropPendingLocked(id)
+			g.log.Debug("request timed out", zap.Uint8("device_invoke_id", id),
+				zap.Stringer("client", p.client))
+		}
+	}
+	for k, c := range g.done {
+		if now.After(c.deadline) {
+			delete(g.done, k)
+		}
+	}
+	for id, ex := range g.fromDevice {
+		if now.After(ex.deadline) {
+			g.dropExchangeLocked(id)
+		}
+	}
+	for obj, subs := range g.cov {
+		for k, sub := range subs {
+			if !sub.expires.IsZero() && now.After(sub.expires) {
+				delete(subs, k)
+				g.subCount--
+				g.metrics.Subscriptions.Dec()
+			}
+		}
+		if len(subs) == 0 {
+			delete(g.cov, obj)
+		}
+	}
+	for k, c := range g.clients {
+		if now.Sub(c.last) > clientIdle {
+			delete(g.clients, k)
+		}
+	}
+}
+
+func (g *Gateway) sendDevice(frame []byte) {
+	if _, err := g.deviceConn.WriteToUDP(frame, g.deviceAddr); err != nil {
+		g.log.Warn("device leg write", zap.Error(err), zap.Stringer("device", g.deviceAddr))
+	}
+}
+
+func (g *Gateway) sendClient(frame []byte, client *net.UDPAddr) {
+	if _, err := g.clientConn.WriteToUDP(frame, client); err != nil {
+		g.log.Debug("client leg write", zap.Error(err), zap.Stringer("client", client))
+	}
+}
+
+// buildFrame wraps an NPDU as a plain Original-Unicast BACnet/IP frame. The
+// proxy always speaks unicast to the device and to each client, even when the
+// client sent a broadcast: the proxy has exactly one device, so a broadcast is
+// a discovery request aimed at that device.
+func buildFrame(n bacnet.NPDU, apdu []byte) []byte {
+	n = n.StripRouting()
+	n.APDU = apdu
+	return bacnet.BVLC{Function: bacnet.BVLCOriginalUnicastNPDU, Data: n.Marshal()}.Marshal()
+}
+
+// touchClient records a client for unsolicited notification delivery. It is
+// called only after the ACL and rate checks, so an off-list source never enters
+// the table. At the cap the oldest entry is evicted: a new legitimate client is
+// more valuable than a stale one.
+func (g *Gateway) touchClient(src *net.UDPAddr, now time.Time) {
+	key := src.String()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if c, ok := g.clients[key]; ok {
+		c.last = now
+		c.addr = src
+		return
+	}
+	if len(g.clients) >= maxClients {
+		var oldestKey string
+		var oldest time.Time
+		for k, c := range g.clients {
+			if oldestKey == "" || c.last.Before(oldest) {
+				oldestKey, oldest = k, c.last
+			}
+		}
+		delete(g.clients, oldestKey)
+	}
+	g.clients[key] = &clientState{addr: src, last: now}
+}
+
+// activeClients snapshots the clients that should receive a broadcast-shaped
+// notification. The slice is a copy; the caller may send to it without the
+// lock.
+func (g *Gateway) activeClients() []*net.UDPAddr {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := time.Now()
+	out := make([]*net.UDPAddr, 0, len(g.clients))
+	for _, c := range g.clients {
+		if now.Sub(c.last) <= clientIdle {
+			out = append(out, c.addr)
+		}
+	}
+	return out
+}
+
+type clientState struct {
+	addr *net.UDPAddr
+	last time.Time
+}

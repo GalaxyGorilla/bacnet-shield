@@ -96,7 +96,7 @@ func ParsePropertyID(s string) (PropertyID, error) {
 	}
 	norm := strings.ReplaceAll(s, "-", "_")
 	for id, name := range propertyNames {
-		if name == norm {
+		if strings.ReplaceAll(name, "-", "_") == norm {
 			return id, nil
 		}
 	}
@@ -209,6 +209,9 @@ func parseWritePropertyMultiple(payload []byte) ([]WriteTarget, error) {
 			if t.Number != 0 {
 				return nil, fmt.Errorf("bacnet: write-property-multiple: closing tag %d, want 0", t.Number)
 			}
+			if len(out) == 0 {
+				return nil, fmt.Errorf("bacnet: write-property-multiple: empty write list")
+			}
 			return out, nil
 		}
 		if !t.Context || t.Number != 0 || len(t.Data) != 4 {
@@ -225,10 +228,18 @@ func parseWritePropertyMultiple(payload []byte) ([]WriteTarget, error) {
 		if !spec.Opening || spec.Number != 1 {
 			return nil, fmt.Errorf("bacnet: write-property-multiple: want property list, got tag %d", spec.Number)
 		}
+		var held *Tag
 		for {
-			t, err := r.next()
-			if err != nil {
-				return nil, fmt.Errorf("bacnet: write-property-multiple: %w", err)
+			var t Tag
+			if held != nil {
+				t = *held
+				held = nil
+			} else {
+				var err error
+				t, err = r.next()
+				if err != nil {
+					return nil, fmt.Errorf("bacnet: write-property-multiple: %w", err)
+				}
 			}
 			if t.Closing {
 				if t.Number != 1 {
@@ -259,10 +270,27 @@ func parseWritePropertyMultiple(payload []byte) ([]WriteTarget, error) {
 				return nil, fmt.Errorf("bacnet: write-property-multiple: value tag %d, want 2", t.Number)
 			}
 			if t.Opening {
-				if err := r.skipValue(); err != nil {
+				if err := r.skipValue(t.Number); err != nil {
 					return nil, fmt.Errorf("bacnet: write-property-multiple: %w", err)
 				}
 			}
+			// The priority is an optional context tag 3 after the value. It
+			// has no effect on the policy target, but it must be consumed or
+			// the next iteration would read it as a property identifier.
+			t, err = r.next()
+			if err != nil {
+				return nil, fmt.Errorf("bacnet: write-property-multiple: %w", err)
+			}
+			if t.Context && t.Number == 3 {
+				if _, err := t.uint(); err != nil {
+					return nil, fmt.Errorf("bacnet: write-property-multiple: priority: %w", err)
+				}
+				t, err = r.next()
+				if err != nil {
+					return nil, fmt.Errorf("bacnet: write-property-multiple: %w", err)
+				}
+			}
+			held = &t
 			out = append(out, WriteTarget{Object: obj, Property: prop, ArrayIndex: index})
 		}
 	}
@@ -346,9 +374,114 @@ func objectTag(payload []byte, want uint8) (ObjectID, bool) {
 			return oid, true
 		}
 		if t.Opening {
-			if err := r.skipValue(); err != nil {
+			if err := r.skipValue(t.Number); err != nil {
 				return ObjectID{}, false
 			}
 		}
 	}
+}
+
+// COVSubscription decodes the fields the proxy needs from a SubscribeCOV or
+// SubscribeCOVProperty request: the monitored object (tag 1), the subscriber
+// process identifier (tag 0), and the optional lifetime (tag 3).
+//
+// hasLifetime is false for a cancellation: a SubscribeCOV with the process id
+// and object but no lifetime removes the subscription. A lifetime of 0 means
+// "no expiry"; a positive value is a relative expiry in seconds.
+func COVSubscription(a APDU) (obj ObjectID, procID uint32, lifetime uint32, hasLifetime bool, ok bool) {
+	if a.Type != PDUConfirmedRequest || !a.HasService {
+		return ObjectID{}, 0, 0, false, false
+	}
+	if a.Service != ServiceSubscribeCOV && a.Service != ServiceSubscribeCOVProperty {
+		return ObjectID{}, 0, 0, false, false
+	}
+	var haveObj, haveProc bool
+	r := &tagReader{b: a.Payload}
+	for r.i < len(r.b) {
+		t, err := r.next()
+		if err != nil {
+			return ObjectID{}, 0, 0, false, false
+		}
+		if t.Opening {
+			if err := r.skipValue(t.Number); err != nil {
+				return ObjectID{}, 0, 0, false, false
+			}
+			continue
+		}
+		if !t.Context {
+			continue
+		}
+		switch t.Number {
+		case 0:
+			v, err := t.uint()
+			if err != nil {
+				return ObjectID{}, 0, 0, false, false
+			}
+			procID, haveProc = v, true
+		case 1:
+			if len(t.Data) != 4 {
+				return ObjectID{}, 0, 0, false, false
+			}
+			o, err := ParseObjectID(t.Data)
+			if err != nil {
+				return ObjectID{}, 0, 0, false, false
+			}
+			obj, haveObj = o, true
+		case 3:
+			v, err := t.uint()
+			if err != nil {
+				return ObjectID{}, 0, 0, false, false
+			}
+			lifetime, hasLifetime = v, true
+		}
+	}
+	if !haveObj || !haveProc {
+		return ObjectID{}, 0, 0, false, false
+	}
+	return obj, procID, lifetime, hasLifetime, true
+}
+
+// COVNotificationProcessID returns the subscriber process identifier of a COV
+// notification (context tag 0). It is the same identifier the subscription
+// carried, which is what lets the proxy pair a notification with its
+// subscriber.
+func COVNotificationProcessID(a APDU) (uint32, bool) {
+	notification := (a.Type == PDUUnconfirmedRequest && a.Service == ServiceUnconfirmedCOVNotification) ||
+		(a.Type == PDUConfirmedRequest && a.Service == ServiceConfirmedCOVNotification)
+	if !notification {
+		return 0, false
+	}
+	return topLevelUint(a.Payload, 0)
+}
+
+// IAmDeviceID returns the device object identifier of an I-Am (context tag 0).
+func IAmDeviceID(a APDU) (ObjectID, bool) {
+	if a.Type != PDUUnconfirmedRequest || !a.HasService || a.Service != ServiceIAm {
+		return ObjectID{}, false
+	}
+	return objectTag(a.Payload, 0)
+}
+
+func topLevelUint(payload []byte, want uint8) (uint32, bool) {
+	r := &tagReader{b: payload}
+	for r.i < len(r.b) {
+		t, err := r.next()
+		if err != nil {
+			return 0, false
+		}
+		if t.Opening {
+			if err := r.skipValue(t.Number); err != nil {
+				return 0, false
+			}
+			continue
+		}
+		if t.Context && t.Number == want {
+			v, err := t.uint()
+			if err != nil {
+				return 0, false
+			}
+			return v, true
+		}
+	}
+	return 0, false
 }

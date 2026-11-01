@@ -337,9 +337,9 @@ func TestAPDUParse(t *testing.T) {
 		},
 		{
 			name: "error",
-			hex:  "50010f0428",
+			hex:  "50010f91049128",
 			want: APDU{Type: PDUError, InvokeID: 1, HasInvokeID: true,
-				Service: ServiceWriteProperty, HasService: true, Payload: []byte{4, 40}},
+				Service: ServiceWriteProperty, HasService: true, Payload: []byte{0x91, 4, 0x91, 40}},
 		},
 		{
 			name: "reject",
@@ -641,5 +641,169 @@ func TestIPMAC(t *testing.T) {
 	}
 	if _, err := IPMACFromUDP(&net.UDPAddr{IP: net.ParseIP("::1"), Port: 47808}); err == nil {
 		t.Fatal("IPv6 accepted as a BACnet/IPv4 address")
+	}
+}
+
+func TestWriteTargetsWritePropertyMultiplePriority(t *testing.T) {
+	// A priority (context tag 3) after the value must be consumed, not read
+	// as the next property identifier.
+	payload := mustHex(t,
+		"0e"+
+			"0c00800005"+"1e"+"0955"+"2e"+"443f800000"+"2f"+"3903"+"1f"+
+			"0f")
+	a := APDU{Type: PDUConfirmedRequest, HasService: true, Service: ServiceWritePropertyMultiple, Payload: payload}
+	ts, isWrite, err := WriteTargets(a)
+	if err != nil || !isWrite || len(ts) != 1 {
+		t.Fatalf("targets = %+v, isWrite=%v, err=%v", ts, isWrite, err)
+	}
+	if ts[0].Object != (ObjectID{Type: ObjectAnalogValue, Instance: 5}) || ts[0].Property != PropertyPresentValue {
+		t.Fatalf("target = %+v", ts[0])
+	}
+}
+
+func TestWriteTargetsZeroLengthProperty(t *testing.T) {
+	// Property identifier 0 (acked-transitions) is a zero-length context tag.
+	payload := mustHex(t, "0c00800005"+"18"+"3e443f8000003f")
+	a := APDU{Type: PDUConfirmedRequest, HasService: true, Service: ServiceWriteProperty, Payload: payload}
+	ts, _, err := WriteTargets(a)
+	if err != nil || len(ts) != 1 {
+		t.Fatalf("targets = %+v, err=%v", ts, err)
+	}
+	if ts[0].Property != PropertyID(0) {
+		t.Fatalf("property = %v", ts[0].Property)
+	}
+}
+
+func TestCOVSubscriptionFields(t *testing.T) {
+	// Timed subscription: process 1, object analog-value,5, confirmed, lifetime 10.
+	sub := APDU{Type: PDUConfirmedRequest, HasService: true, Service: ServiceSubscribeCOV,
+		Payload: mustHex(t, "0901"+"1c00800005"+"2901"+"390a")}
+	obj, proc, life, hasLife, ok := COVSubscription(sub)
+	if !ok || obj != (ObjectID{Type: ObjectAnalogValue, Instance: 5}) || proc != 1 || !hasLife || life != 10 {
+		t.Fatalf("subscription = %v %d %d %v %v", obj, proc, life, hasLife, ok)
+	}
+
+	// Cancellation: no lifetime tag.
+	sub.Payload = mustHex(t, "0901"+"1c00800005")
+	if _, _, _, hasLife, ok := COVSubscription(sub); !ok || hasLife {
+		t.Fatalf("cancel = hasLifetime %v, ok %v", hasLife, ok)
+	}
+
+	// A permanent subscription has lifetime 0, not "no lifetime".
+	sub.Payload = mustHex(t, "0901"+"1c00800005"+"3900")
+	if _, _, life, hasLife, ok := COVSubscription(sub); !ok || !hasLife || life != 0 {
+		t.Fatalf("permanent = lifetime %d, hasLifetime %v, ok %v", life, hasLife, ok)
+	}
+
+	// A read is not a subscription.
+	read := APDU{Type: PDUConfirmedRequest, HasService: true, Service: ServiceReadProperty}
+	if _, _, _, _, ok := COVSubscription(read); ok {
+		t.Fatal("a read parsed as a subscription")
+	}
+}
+
+func TestCOVNotificationProcessID(t *testing.T) {
+	notif := APDU{Type: PDUUnconfirmedRequest, HasService: true, Service: ServiceUnconfirmedCOVNotification,
+		Payload: mustHex(t, "0901"+"1c02000064"+"2c00800005"+"3900"+"4e0f")}
+	if id, ok := COVNotificationProcessID(notif); !ok || id != 1 {
+		t.Fatalf("process id = %d, %v", id, ok)
+	}
+	sub := APDU{Type: PDUConfirmedRequest, HasService: true, Service: ServiceSubscribeCOV,
+		Payload: mustHex(t, "0901"+"1c00800005")}
+	if _, ok := COVNotificationProcessID(sub); ok {
+		t.Fatal("a subscription parsed as a notification")
+	}
+}
+
+func TestIAmDeviceID(t *testing.T) {
+	iam := APDU{Type: PDUUnconfirmedRequest, HasService: true, Service: ServiceIAm,
+		Payload: mustHex(t, "0c02000064"+"1905"+"2900"+"3a0005")}
+	oid, ok := IAmDeviceID(iam)
+	if !ok || oid != (ObjectID{Type: ObjectDevice, Instance: 100}) {
+		t.Fatalf("i-am device = %v, %v", oid, ok)
+	}
+	if _, ok := IAmDeviceID(APDU{Type: PDUUnconfirmedRequest, HasService: true, Service: ServiceWhoIs}); ok {
+		t.Fatal("who-is parsed as an i-am")
+	}
+}
+
+func TestTagSkipValueRejectsMismatchedClose(t *testing.T) {
+	// Opening tag 0, opening tag 1, then a closing tag 0 where tag 1 is
+	// expected. Accepting it would let a crafted write move the parser's
+	// cursor and hide a target from the policy.
+	r := &tagReader{b: mustHex(t, "0e1e0f0f")}
+	if _, err := r.next(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.skipValue(0); err == nil {
+		t.Fatal("mismatched closing tag accepted")
+	}
+
+	r = &tagReader{b: mustHex(t, "0e1e1f0f")}
+	if _, err := r.next(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.skipValue(0); err != nil {
+		t.Fatalf("well-nested value rejected: %v", err)
+	}
+}
+
+func TestTagUintZeroLength(t *testing.T) {
+	// BACnet encodes unsigned 0 as a zero-length value.
+	got, err := (Tag{Number: 0, Context: true}).uint()
+	if err != nil || got != 0 {
+		t.Fatalf("zero-length uint = %d, %v", got, err)
+	}
+	if _, err := (Tag{Number: 0, Context: true, Data: []byte{1, 2, 3, 4, 5}}).uint(); err == nil {
+		t.Fatal("5-byte unsigned accepted")
+	}
+	if _, err := (Tag{Number: 0}).uint(); err == nil {
+		t.Fatal("application tag accepted as a context unsigned")
+	}
+}
+
+func TestErrorCodesAndReject(t *testing.T) {
+	// These octets are wire values a client acts on; pin them.
+	if ErrorClassSecurity != 4 {
+		t.Fatalf("security class = %d", ErrorClassSecurity)
+	}
+	if ErrorCodeWriteAccessDenied != 40 || ErrorCodeServiceRequestDenied != 29 ||
+		ErrorCodeUnknownObject != 31 || ErrorCodeUnknownProperty != 32 {
+		t.Fatal("error code drifted from ASHRAE 135")
+	}
+	rej := RejectAPDU(7, RejectReasonUnrecognizedService)
+	if rej.Type != PDUReject || rej.InvokeID != 7 || !rej.HasInvokeID || !bytes.Equal(rej.Payload, []byte{9}) {
+		t.Fatalf("reject = %+v", rej)
+	}
+	if _, err := ParseAPDU(rej.Marshal()); err != nil {
+		t.Fatalf("reject does not round trip: %v", err)
+	}
+}
+
+// TestErrorAPDUEncoding pins the exact bytes a locally generated Error PDU
+// puts on the wire. Error class and code are application-tagged ENUMERATEDs
+// (tag number 9, one octet each), so class security (4) and code
+// write-access-denied (40) encode as 91 04 91 28. This vector was taken from
+// bacpypes3 0.0.110; a raw-octet encoding is silently dropped by a strict
+// stack, which turns a denial into an apparent timeout.
+func TestErrorAPDUEncoding(t *testing.T) {
+	errAPDU := ErrorAPDU(1, ServiceWriteProperty, ErrorClassSecurity, ErrorCodeWriteAccessDenied)
+	if got, want := errAPDU.Marshal(), mustHex(t, "50010f91049128"); !bytes.Equal(got, want) {
+		t.Fatalf("error apdu = % x, want % x", got, want)
+	}
+
+	class, code, ok := ErrorClassAndCode(errAPDU.Payload)
+	if !ok || class != ErrorClassSecurity || code != ErrorCodeWriteAccessDenied {
+		t.Fatalf("decode = %d/%d ok=%v, want %d/%d", class, code, ok,
+			ErrorClassSecurity, ErrorCodeWriteAccessDenied)
+	}
+
+	// A raw, untagged payload is refused rather than misread as class 4.
+	if _, _, ok := ErrorClassAndCode([]byte{4, 40}); ok {
+		t.Fatal("untagged error payload accepted")
+	}
+	// So is a truncated one.
+	if _, _, ok := ErrorClassAndCode([]byte{0x91, 4, 0x91}); ok {
+		t.Fatal("truncated error payload accepted")
 	}
 }

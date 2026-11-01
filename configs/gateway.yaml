@@ -1,0 +1,92 @@
+# bacnet-shield example configuration — single-device gateway (v1).
+# One file = one proxy instance in front of ONE legacy BACnet/IP device.
+#
+#   [N clients] --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [legacy device]
+#
+# Run:    bacnet-shield gateway --config /etc/bacnet-shield/gateway.yaml
+# Reload: kill -HUP <pid>   (swaps the access policy in place)
+#   Applies: access.allow, access.rate_per_sec, access.read_only,
+#            access.write_policy.
+#   Needs a restart (logged as warnings): listen_addr, device_addr,
+#            device_local_addr, device_instance, request_timeout_secs,
+#            max_pending, log_level, metrics.addr.
+# Or without a file (single device, flags only):
+#   bacnet-shield gateway --listen :47808 --device 10.0.0.42:47808 --read-only
+#
+# Clients keep talking BACnet/IP; only the address they point at changes
+# (this box). The device sees a normal BACnet client and notices nothing.
+
+# The client leg. :47808 is the standard BACnet/IP UDP port. If the device
+# and the proxy share a host, give the proxy a different port here.
+listen_addr: ":47808"
+
+# The one legacy device on the clear leg. It must be a unicast IPv4 address.
+device_addr: "10.0.0.42:47808"
+
+# Optional source address of the device leg. Empty = ephemeral port, which is
+# what a BACnet client uses. Pin it when a firewall rule or the device's
+# BBMD/FDT expects a known source.
+# device_local_addr: "10.0.0.10:47808"
+
+# Optional expected device instance. It never gates traffic; a mismatch is a
+# warning in the log and a selftest failure. It also lets selftest probe with
+# a unicast ReadProperty instead of a Who-Is.
+device_instance: 1001
+
+# How long a forwarded request may stay pending before its invoke ID is
+# reclaimed. BACnet APDU retry timers are seconds; 30s covers a lossy
+# building network without holding state.
+request_timeout_secs: 30
+
+# In-flight request cap (1..256; the BACnet invoke ID is one octet).
+max_pending: 256
+
+log_level: info # debug | info | warn | error
+
+access:
+  # Client allow-list (IPs or CIDRs). Empty/omitted = every client.
+  # An off-list datagram is dropped silently: answering it would tell a
+  # scanner that a proxy is here.
+  allow:
+    - "10.8.0.0/24"   # BMS / SCADA segment
+    - "192.168.1.7"   # one engineering workstation
+
+  # Per-client token bucket (requests/second, burst = rate). Protects the
+  # device from a polling storm and the proxy from a spoofed-source flood.
+  # 0/omitted = no limit.
+  rate_per_sec: 50
+
+  # All-or-nothing write protection. A refused write is answered with a
+  # BACnet Error PDU (class security=4, code write-access-denied=40), so the
+  # client fails immediately instead of timing out. Mutually exclusive with
+  # write_policy below. If neither is set, writes pass through unchanged
+  # (protection is opt-in, like the other Shield proxies).
+  read_only: true
+
+  # Object/property-scoped writes instead of read_only:
+  #
+  # write_policy:
+  #   default: deny            # verdict for writes no rule covers
+  #   rules:
+  #     - oid: "analog-value:5:present-value"
+  #       action: allow        # one writable setpoint
+  #     - oid: "analog-value:*:present-value"
+  #       action: deny         # deny wins over allow
+  #     - oid: "*:*:present-value"
+  #       action: allow        # every present-value
+  #
+  # Rule vocabulary: <object-type>:<instance>:<property>, with "*" allowed
+  # in any part. Deny wins over allow, and an allow must cover the WHOLE
+  # write target: a WritePropertyMultiple that mixes an allowed and a
+  # forbidden target is denied as a unit. An undecodable or segmented write
+  # is denied too (fail closed).
+  #
+  # Service-level writes (CreateObject, DeleteObject, ReinitializeDevice,
+  # DeviceCommunicationControl, AddListElement, ...) have no object/property
+  # target to inspect; they are authorized only by the policy default.
+
+metrics:
+  # Prometheus listener. Empty/omitted = metrics off. Bind it to loopback
+  # unless the monitoring network is trusted: the scrape exposes counters
+  # only, but the port is another listener on the box.
+  addr: "127.0.0.1:9203"

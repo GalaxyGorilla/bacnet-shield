@@ -378,10 +378,20 @@ func (a APDU) IsResponse() bool {
 	return false
 }
 
-// IsWrite reports whether the APDU is a confirmed request that changes
-// device state. The write policy gates these; everything else is a read.
+// IsWrite reports whether the APDU changes device state. The write policy
+// gates these; everything else is a read.
+//
+// Unconfirmed requests have no invoke ID and no reply, but WriteGroup and
+// UnconfirmedPrivateTransfer still change the device. Treating them as
+// non-writes would make them a policy bypass that needs no confirmation.
 func (a APDU) IsWrite() bool {
-	return a.Type == PDUConfirmedRequest && a.HasService && a.Service.IsWrite()
+	if !a.HasService {
+		return false
+	}
+	if a.Type == PDUUnconfirmedRequest {
+		return a.Service == ServiceWriteGroup || a.Service == ServiceUnconfirmedPrivateTransfer
+	}
+	return a.Type == PDUConfirmedRequest && a.Service.IsWrite()
 }
 
 // IsWrite reports whether a confirmed service changes device state.
@@ -392,7 +402,8 @@ func (a APDU) IsWrite() bool {
 // writes, and the two "control the device" services as a bypass.
 func (s Service) IsWrite() bool {
 	switch s {
-	case ServiceAtomicWriteFile,
+	case ServiceAcknowledgeAlarm,
+		ServiceAtomicWriteFile,
 		ServiceAddListElement,
 		ServiceRemoveListElement,
 		ServiceCreateObject,
@@ -400,7 +411,14 @@ func (s Service) IsWrite() bool {
 		ServiceWriteProperty,
 		ServiceWritePropertyMultiple,
 		ServiceDeviceCommunicationControl,
-		ServiceReinitializeDevice:
+		ServiceConfirmedPrivateTransfer,
+		ServiceReinitializeDevice,
+		ServiceVTOpen,
+		ServiceVTClose,
+		ServiceVTData,
+		ServiceAuthenticate,
+		ServiceRequestKey,
+		ServiceLifeSafetyOperation:
 		return true
 	}
 	return false
@@ -425,16 +443,22 @@ const (
 type ErrorCode byte
 
 const (
-	ErrorCodeOther             ErrorCode = 0
-	ErrorCodeWriteAccessDenied ErrorCode = 40
-	ErrorCodeUnknownObject     ErrorCode = 31
-	ErrorCodeUnknownProperty   ErrorCode = 75
-	ErrorCodeInvalidDataType   ErrorCode = 9
+	ErrorCodeOther                ErrorCode = 0
+	ErrorCodeInvalidDataType      ErrorCode = 9
+	ErrorCodeServiceRequestDenied ErrorCode = 29
+	ErrorCodeUnknownObject        ErrorCode = 31
+	ErrorCodeUnknownProperty      ErrorCode = 32
+	ErrorCodeWriteAccessDenied    ErrorCode = 40
+	ErrorCodeUnknownSubscription  ErrorCode = 79
 )
 
 // ErrorAPDU builds a locally generated Error PDU answering a confirmed
 // request. The invoke ID and service choice must echo the request: a client
 // correlates the answer by them, and a mismatch looks like a timeout.
+//
+// The two parameters are application-tagged ENUMERATEDs (tag 9, one octet) —
+// not raw octets. A stack that reads them as tags drops a raw encoding as
+// malformed, and the client then waits for a response that already arrived.
 func ErrorAPDU(invokeID byte, service Service, class ErrorClass, code ErrorCode) APDU {
 	return APDU{
 		Type:        PDUError,
@@ -442,6 +466,53 @@ func ErrorAPDU(invokeID byte, service Service, class ErrorClass, code ErrorCode)
 		HasInvokeID: true,
 		Service:     service,
 		HasService:  true,
-		Payload:     []byte{byte(class), byte(code)},
+		Payload: []byte{
+			tagEnumerated<<4 | 1, byte(class),
+			tagEnumerated<<4 | 1, byte(code),
+		},
+	}
+}
+
+// ErrorClassAndCode decodes the error-class and error-code from an Error PDU
+// payload. It reports false rather than guessing when the payload is not the
+// expected pair of ENUMERATEDs.
+func ErrorClassAndCode(payload []byte) (ErrorClass, ErrorCode, bool) {
+	r := &tagReader{b: payload}
+	classTag, err := r.next()
+	if err != nil {
+		return 0, 0, false
+	}
+	class, err := classTag.enumerated()
+	if err != nil {
+		return 0, 0, false
+	}
+	codeTag, err := r.next()
+	if err != nil {
+		return 0, 0, false
+	}
+	code, err := codeTag.enumerated()
+	if err != nil {
+		return 0, 0, false
+	}
+	return ErrorClass(class), ErrorCode(code), true
+}
+
+// RejectReason is the reason octet of a Reject PDU.
+type RejectReason byte
+
+const (
+	RejectReasonOther               RejectReason = 0
+	RejectReasonUnrecognizedService RejectReason = 9
+)
+
+// RejectAPDU builds a locally generated Reject PDU. It is the correct answer
+// when the proxy cannot serve a confirmed request at all (an unsupported
+// service), as opposed to an Error PDU, which reports a service-level failure.
+func RejectAPDU(invokeID byte, reason RejectReason) APDU {
+	return APDU{
+		Type:        PDUReject,
+		InvokeID:    invokeID,
+		HasInvokeID: true,
+		Payload:     []byte{byte(reason)},
 	}
 }

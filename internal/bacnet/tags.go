@@ -90,22 +90,49 @@ func (r *tagReader) next() (Tag, error) {
 }
 
 // skipValue consumes the remainder of one constructed value. The opening tag
-// has already been read; the matching closing tag is consumed as well.
-func (r *tagReader) skipValue() error {
-	depth := 1
-	for depth > 0 {
+// has already been read (open is its tag number); the matching closing tag is
+// consumed as well. Nested constructed values must close in order: a mismatched
+// closing tag is an error, because accepting it would let a crafted write move
+// the parser's cursor and make the policy inspect a different target than the
+// device does.
+func (r *tagReader) skipValue(open uint8) error {
+	stack := []uint8{open}
+	for len(stack) > 0 {
 		t, err := r.next()
 		if err != nil {
 			return err
 		}
 		switch {
 		case t.Opening:
-			depth++
+			stack = append(stack, t.Number)
 		case t.Closing:
-			depth--
+			want := stack[len(stack)-1]
+			if t.Number != want {
+				return fmt.Errorf("bacnet: tag: closing tag %d, want %d", t.Number, want)
+			}
+			stack = stack[:len(stack)-1]
 		}
 	}
 	return nil
+}
+
+// tagEnumerated is the application tag number for an ENUMERATED value. Error
+// classes and error codes are the two ENUMERATEDs every Error PDU carries.
+const tagEnumerated uint8 = 9
+
+// enumerated decodes an application-tagged ENUMERATED value.
+func (t Tag) enumerated() (uint32, error) {
+	if t.Context || t.Number != tagEnumerated {
+		return 0, fmt.Errorf("bacnet: tag %d is not an application enumerated", t.Number)
+	}
+	if len(t.Data) > 4 {
+		return 0, fmt.Errorf("bacnet: enumerated: %d-byte value", len(t.Data))
+	}
+	var v uint32
+	for _, b := range t.Data {
+		v = v<<8 | uint32(b)
+	}
+	return v, nil
 }
 
 // uint decodes a context-tagged unsigned integer (property identifiers and
@@ -114,9 +141,12 @@ func (t Tag) uint() (uint32, error) {
 	if !t.Context {
 		return 0, fmt.Errorf("bacnet: tag %d is not context tagged", t.Number)
 	}
-	if len(t.Data) == 0 || len(t.Data) > 4 {
+	if len(t.Data) > 4 {
 		return 0, fmt.Errorf("bacnet: tag %d: %d-byte unsigned", t.Number, len(t.Data))
 	}
+	// BACnet encodes unsigned 0 with a zero-length value, so empty data is
+	// 0, not a malformed tag. Property identifier 0 (acked-transitions) and
+	// array index 0 both use this form.
 	var v uint32
 	for _, b := range t.Data {
 		v = v<<8 | uint32(b)
