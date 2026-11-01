@@ -64,6 +64,13 @@ func ProbeDevice(ctx context.Context, deviceAddr string, instance *uint32) (Prob
 			return res, nil
 		}
 		lastErr = err
+		// Retry only while there is budget left. An attempt reads until the
+		// probe deadline, which is the context deadline when one is set;
+		// once that has passed there is nothing left to spend, and testing
+		// ctx.Err() here would race the context timer and send a duplicate.
+		if !time.Now().Before(probeDeadline(ctx)) {
+			break
+		}
 	}
 	return ProbeResult{}, lastErr
 }
