@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/GalaxyGorilla/bacnet-shield/internal/access"
 	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet/sc"
 )
 
 // Config is one gateway instance. Roles are subcommands, not config fields:
@@ -42,6 +44,7 @@ type Config struct {
 
 	LogLevel string  `yaml:"log_level"`
 	Access   Access  `yaml:"access"`
+	SC       SC      `yaml:"sc"`
 	Metrics  Metrics `yaml:"metrics"`
 }
 
@@ -49,9 +52,35 @@ type Config struct {
 // Shield projects so one policy vocabulary covers the appliance family.
 type Access struct {
 	Allow       []string     `yaml:"allow"`
+	SCAllow     []string     `yaml:"sc_allow"`
 	RatePerSec  float64      `yaml:"rate_per_sec"`
 	ReadOnly    bool         `yaml:"read_only"`
 	WritePolicy *WritePolicy `yaml:"write_policy"`
+}
+
+// SC is the optional BACnet/SC front leg. An empty block leaves the leg off;
+// the BACnet/IP leg always exists. The proxy attaches to an existing hub as a
+// node, so there is no hub listener to configure here.
+type SC struct {
+	// VMAC is the proxy's 6-octet virtual MAC on the hub.
+	VMAC string `yaml:"vmac"`
+	// UUID is the proxy's 16-octet device UUID on the hub.
+	UUID string `yaml:"uuid"`
+	// Hubs are WebSocket URLs, primary first, failover after. They must be
+	// wss://; plain ws:// is not a BACnet/SC deployment.
+	Hubs []string `yaml:"hubs"`
+	// CAFile optionally replaces the system roots for hub verification.
+	CAFile string `yaml:"ca_file"`
+	// CertFile and KeyFile optionally present a client certificate.
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+}
+
+// Enabled reports whether any SC field was configured. A partially configured
+// block is rejected by Validate, never silently run as "SC off".
+func (s SC) Enabled() bool {
+	return s.VMAC != "" || s.UUID != "" || len(s.Hubs) > 0 ||
+		s.CAFile != "" || s.CertFile != "" || s.KeyFile != ""
 }
 
 // WritePolicy is the OID-scoped write policy. It is mutually exclusive with
@@ -149,8 +178,53 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	if err := c.validateSC(); err != nil {
+		return err
+	}
 	if _, err := c.AccessPolicy(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateSC checks the BACnet/SC block. Every field is checked without a
+// network: a VMAC or URL typo must fail `validate` instead of producing a node
+// that reconnect-loops against a name it can never resolve.
+func (c *Config) validateSC() error {
+	s := c.SC
+	if !s.Enabled() {
+		return nil
+	}
+	if s.VMAC == "" {
+		return fmt.Errorf("config: sc.vmac is required when the sc block is configured")
+	}
+	vmac, err := sc.ParseMAC(s.VMAC)
+	if err != nil {
+		return fmt.Errorf("config: sc.vmac: %w", err)
+	}
+	if vmac.IsZero() || vmac.IsBroadcast() {
+		return fmt.Errorf("config: sc.vmac %q must be a unicast VMAC", s.VMAC)
+	}
+	if s.UUID == "" {
+		return fmt.Errorf("config: sc.uuid is required when the sc block is configured")
+	}
+	if _, err := sc.ParseUUID(s.UUID); err != nil {
+		return fmt.Errorf("config: sc.uuid: %w", err)
+	}
+	if len(s.Hubs) == 0 {
+		return fmt.Errorf("config: sc.hubs needs at least one wss:// URL")
+	}
+	for _, raw := range s.Hubs {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return fmt.Errorf("config: sc.hubs %q: %w", raw, err)
+		}
+		if u.Scheme != "wss" || u.Host == "" {
+			return fmt.Errorf("config: sc.hubs %q must be a wss:// URL", raw)
+		}
+	}
+	if (s.CertFile == "") != (s.KeyFile == "") {
+		return fmt.Errorf("config: sc.cert_file and sc.key_file must be set together")
 	}
 	return nil
 }
@@ -158,6 +232,10 @@ func (c *Config) Validate() error {
 // AccessPolicy compiles the access block into the runtime policy.
 func (c *Config) AccessPolicy() (*access.Policy, error) {
 	list, err := access.NewList(c.Access.Allow)
+	if err != nil {
+		return nil, err
+	}
+	scList, err := access.NewMACList(c.Access.SCAllow)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +261,7 @@ func (c *Config) AccessPolicy() (*access.Policy, error) {
 	if err != nil {
 		return nil, err
 	}
-	return access.NewPolicy(list, limit, write), nil
+	return access.NewPolicy(list, limit, write).WithSCAllow(scList), nil
 }
 
 // DeviceObjectID returns the pinned device instance as an object id, if one

@@ -300,6 +300,73 @@ func TestNodeConnectsSendsAndReceives(t *testing.T) {
 	}
 }
 
+func TestNodeFiltersInboundNPDUs(t *testing.T) {
+	h := newTestHub(t)
+	n := testNode(t, h, NodeConfig{})
+
+	received := make(chan hubNPDU, 4)
+	n.SetNPDUHandler(func(orig *sc.MAC, npdu []byte) {
+		received <- hubNPDU{orig: orig, data: append([]byte(nil), npdu...)}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = n.Run(ctx) }()
+
+	hc := h.waitConn(t, 3*time.Second)
+	waitConnected(t, n, 3*time.Second)
+
+	client := sc.MAC{0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01}
+	other := sc.MAC{0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x02}
+	we := n.VMAC()
+
+	// Addressed to another node: not ours to deliver.
+	h.send(hc, sc.Header{Function: sc.FuncEncapsulatedNPDU, MessageID: 0x201,
+		Orig: &client, Dest: &other, Payload: []byte{1, 1}})
+	// No origin: cannot be attributed to a client.
+	h.send(hc, sc.Header{Function: sc.FuncEncapsulatedNPDU, MessageID: 0x202,
+		Dest: &we, Payload: []byte{2, 2}})
+	// A zero origin is the same as none.
+	zero := sc.MAC{}
+	h.send(hc, sc.Header{Function: sc.FuncEncapsulatedNPDU, MessageID: 0x203,
+		Orig: &zero, Dest: &we, Payload: []byte{3, 3}})
+
+	select {
+	case got := <-received:
+		t.Fatalf("node delivered a frame it should have dropped: %x from %v", got.data, got.orig)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Addressed to us: delivered.
+	h.send(hc, sc.Header{Function: sc.FuncEncapsulatedNPDU, MessageID: 0x204,
+		Orig: &client, Dest: &we, Payload: []byte{4, 4}})
+	select {
+	case got := <-received:
+		if got.orig == nil || *got.orig != client {
+			t.Fatalf("inbound orig = %v, want %v", got.orig, client)
+		}
+		if string(got.data) != string([]byte{4, 4}) {
+			t.Fatalf("inbound payload = %x", got.data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("node dropped a frame addressed to it")
+	}
+
+	// A broadcast destination is delivered too: discovery is addressed to
+	// every node and the proxy answers it as the one device.
+	bcast := sc.BroadcastMAC
+	h.send(hc, sc.Header{Function: sc.FuncEncapsulatedNPDU, MessageID: 0x205,
+		Orig: &client, Dest: &bcast, Payload: []byte{5, 5}})
+	select {
+	case got := <-received:
+		if string(got.data) != string([]byte{5, 5}) {
+			t.Fatalf("broadcast payload = %x", got.data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("node dropped a broadcast frame")
+	}
+}
+
 func TestNodeHeartbeats(t *testing.T) {
 	h := newTestHub(t)
 	n := testNode(t, h, NodeConfig{})

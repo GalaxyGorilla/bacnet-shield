@@ -14,13 +14,15 @@ From the original motivation:
 Deployment model (v1, single-device gateway):
 
 ```
-[N clients] --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [one legacy device]
+[N clients]    --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [one legacy device]
+[N SC nodes] --BACnet/SC--> [existing hub] --> [bacnet-shield] --BACnet/IP-->
 ```
 
 Clients are repointed to the proxy once; the device stays unchanged and keeps
 speaking plain BACnet/IP. The proxy is the device's security gate: client
 allow-list, per-client rate limit, and object/property-scoped write
-protection. It is **not** a BACnet device stack, a BBMD, or a router.
+protection. It is **not** a BACnet device stack, a BBMD, a router, or an SC
+hub.
 
 The v1 essence: a **strict forwarder** — the service payload goes in and out
 byte for byte; only the link/network headers and the APDU invoke ID are
@@ -38,10 +40,12 @@ rewritten, and only the front-leg policy can reject a request.
 | Security v1 | IP/CIDR allow-list + per-client token bucket + `read_only` **or** `<object-type>:<instance>:<property>` write policy. Write protection is opt-in: with neither configured, writes pass through. Deny-overrides, allow-must-cover, fail-closed on undecodable/segmented writes |
 | Denial shape | ACL/rate denials are silent. A refused write gets Error class `security` (4) / code `write-access-denied` (40). Unsupported subscriptions get class `services` (5) / code `service-request-denied` (29). An unroutable confirmed COV gets code `unknown-subscription` (79) |
 | COV | Track `SubscribeCOV` and `SubscribeCOVProperty` (one monitored object each). Install only after a SimpleACK. `SubscribeCOVPropertyMultiple` is refused |
-| Config changes | `SIGHUP` re-reads `--config` and swaps only the access policy. Listener/device/timeout/log/metrics changes are reported as restart-only warnings. Invalid reload keeps the running policy |
+| Config changes | `SIGHUP` re-reads `--config` and swaps only the access policy (including `access.sc_allow`). Listener/device/timeout/log/metrics and the whole `sc` block are reported as restart-only warnings. Invalid reload keeps the running policy |
 | Secure front leg | BACnet/SC (TLS 1.3 + WebSocket, BVLC-SC `0x82`). The proxy is an SC **node** that attaches to an existing hub (primary + failover), not a hub itself. A private PSK tunnel is explicitly rejected |
-| SC client admission | Opt-in SC allow-list keyed by VMAC/UUID. With none configured, any node the hub delivers is accepted and only the write policy gates it (same "protection is opt-in" shape as the IP leg). The SC leg is multi-client: state is keyed per sender VMAC, never per connection |
-| SC transport | TLS 1.3 (`crypto/tls`) + a small, fuzzed WebSocket frame parser we own, not a WebSocket dependency. The proxy is always the WebSocket client |
+| Front-leg identity | One `peer` abstraction (`Key`, `IP`, `SendNPDU`) keyed by `ip:port` on the IP leg and `sc:<vmac>` on the SC leg. The data plane and its replay cache hold **NPDUs**, not link frames, so both legs share pending, replay, COV and write policy. Never key SC state by connection |
+| SC client admission | Opt-in SC allow-list keyed by **VMAC** (`access.sc_allow`). With none configured, any node the hub delivers is accepted and only the write policy gates it (same "protection is opt-in" shape as the IP leg). UUID-keyed rules need Address-Resolution, which the node does not implement; do not silently accept a UUID entry |
+| SC transport | TLS 1.3 (`crypto/tls`) + a small, fuzzed WebSocket frame parser we own, not a WebSocket dependency. The proxy is always the WebSocket client. The hub is trusted to attribute frames to their originating VMAC; the node still drops a frame addressed to another VMAC or with a zero/missing origin |
+| Device leg | Always plain BACnet/IPv4 over UDP, even when the front leg is SC. The SC leg is additive, not a replacement for the IP listener |
 | Ground truth | ASHRAE 135 wire formats, cross-checked against **bacpypes3 0.0.110** in `.venv`. Vendor divergence is reported in [CONFORMANCE.md](CONFORMANCE.md), never silently adapted away in the proxy |
 | No CI | Deliberate user decision across the Shield projects. Gates are local `make` targets |
 
@@ -67,17 +71,22 @@ scripts/               bacpypes3 peer provisioning and interop drivers
 ### Data path
 
 1. `clientLoop` reads a datagram, applies `Policy.Check` (ACL first, then the
-   rate limit; an off-list source never consumes another client's token), and
-   parses BVLC → NPDU → APDU.
+   rate limit; an off-list source never consumes another client's token),
+   parses BVLC, wraps the source in a `udpPeer`, and calls
+   `handleClientNPDU`.
+   The SC leg's `handleSCNPDU` applies `Policy.CheckSC` (VMAC allow-list, then a
+   VMAC-keyed rate limit) before parsing, wraps the sender VMAC in an `scPeer`,
+   and calls the same `handleClientNPDU`.
 2. `handleClientConfirmed` refuses unsupported subscription services, applies
    `AllowWrite`, and calls `forwardConfirmed`.
 3. `forwardConfirmed` allocates a device invoke ID, patches the octet, records
-   `pending[devID]` and `byClient[(client, clientInvokeID)]`, and sends the
+   `pending[devID]` and `byClient[(peer key, clientInvokeID)]`, and sends the
    frame to the device.
 4. `deviceLoop` accepts datagrams only from the configured device **IP**
    (the port is learned from the response, because stacks reply from a
    different port). A response is correlated through `pending`, patched back
-   to the client's invoke ID, cached if complete, and sent.
+   to the client's invoke ID, cached as an NPDU if complete, and sent through
+   that peer's link layer.
 5. The sweeper expires pending requests, replay entries, device exchanges,
    COV subscriptions and idle clients once per second.
 
@@ -86,12 +95,12 @@ scripts/               bacpypes3 peer provisioning and interop drivers
 | Table | Key | Bound / lifetime |
 |---|---|---|
 | `pending` | device invoke ID | `max_pending` (1..256), `request_timeout_secs` |
-| `byClient` | client addr + client invoke ID | one entry per pending request |
-| `done` | client addr + client invoke ID | 2048 entries, 30 s |
-| `fromDevice` / `toDevice` | device invoke ID / client key | `request_timeout_secs`, plus 10 s segment grace |
-| `clients` | client IP:port | 1024 entries, 5 min idle |
-| `cov` | monitored object + subscriber process ID + client | 4096 subscriptions, optional device lifetime |
-| rate buckets | client IP string | 4096 entries, 5 min idle sweep |
+| `byClient` | peer key + client invoke ID | one entry per pending request |
+| `done` | peer key + client invoke ID | 2048 entries, 30 s |
+| `fromDevice` / `toDevice` | device invoke ID / peer key | `request_timeout_secs`, plus 10 s segment grace |
+| `clients` | peer key (`ip:port` or `sc:<vmac>`) | 1024 entries, 5 min idle |
+| `cov` | monitored object + subscriber process ID + peer key | 4096 subscriptions, optional device lifetime |
+| rate buckets | IP string or `sc:<vmac>` | 4096 entries, 5 min idle sweep |
 
 ### Wire invariants pinned by tests
 
@@ -113,6 +122,16 @@ scripts/               bacpypes3 peer provisioning and interop drivers
   subscriber is never broadcast to everyone.
 - A segmented write is denied before decoding. A non-segmented
   WritePropertyMultiple is decoded far enough to authorize every target.
+- The data plane and the replay cache hold **NPDUs**. The IP leg wraps one in
+  `BVLC Original-Unicast` on the way out; the SC leg hands it to
+  `Encapsulated-NPDU`. A cached frame tied to one link layer would break the
+  other leg.
+- An SC node drops an `Encapsulated-NPDU` whose destination is a different
+  VMAC and one with no (or a zero) origin VMAC, even though the hub should
+  have routed it. Pinned by `TestNodeFiltersInboundNPDUs`.
+- SC peer state is keyed by `sc:<vmac>`; two SC nodes using invoke ID 7 at the
+  same time must each get their own answer. Pinned by
+  `TestGatewaySCMultiClientInvokeIDs`.
 
 ## 4. CLI and configuration contract
 
@@ -124,12 +143,18 @@ mode is for a two-line paste install; YAML mode is the appliance shape. Both
 compile to the same `config.Config`, so validation and the daemon cannot
 drift.
 
-Reloadable on `SIGHUP`: `access.allow`, `access.rate_per_sec`,
-`access.read_only`, `access.write_policy`.
+Reloadable on `SIGHUP`: `access.allow`, `access.sc_allow`,
+`access.rate_per_sec`, `access.read_only`, `access.write_policy`.
 
 Restart-only (reported, never silently ignored): `listen_addr`,
 `device_addr`, `device_local_addr`, `device_instance`,
-`request_timeout_secs`, `max_pending`, `log_level`, `metrics.addr`.
+`request_timeout_secs`, `max_pending`, `log_level`, `metrics.addr`, and the
+whole `sc` block (`vmac`, `uuid`, `hubs`, `ca_file`, `cert_file`, `key_file`).
+
+The SC leg is configured either as an `sc:` YAML block or with
+`--sc-vmac/--sc-uuid/--sc-hub/--sc-ca/--sc-cert/--sc-key`; `sc_allow` is
+`--sc-allow`. A partially configured block is a validation error, never a
+silently disabled leg.
 
 A reload with an invalid file or policy logs an error and keeps the running
 configuration. In flags mode a SIGHUP is ignored with a warning: there is no
@@ -144,9 +169,16 @@ file to re-read and the flags came from the command line.
 - **Test volume is fine** — 10× the operational code is acceptable when the
   suite is structured and maintainable. Share fixtures (`harness_test.go`)
   instead of copying them.
-- **Fuzz targets** live in `internal/bacnet/fuzz_test.go` and, for the SC
-  codec, `internal/bacnet/sc/fuzz_test.go`. Every parser entry point has one; a
+- **Fuzz targets** live in `internal/bacnet/fuzz_test.go`, the SC codec
+  (`internal/bacnet/sc/fuzz_test.go`), and the WebSocket frame parser
+  (`internal/scnet` `FuzzParseFrame`). Every parser entry point has one; a
   crash is a bug, not a corpus entry to hide.
+- **SC tests** run a real in-process TLS 1.3 hub (`internal/scnet/node_test.go`)
+  for connect/heartbeat/reconnect and destination filtering, and drive the
+  proxy data plane through an in-memory SC leg (`internal/proxy/sc_test.go`)
+  for two clients with the same invoke ID, per-VMAC ACL/rate, write denial, COV
+  fan-out and I-Am fan-out. Keep those two seams separate: the fake leg proves
+  the data plane, the TLS hub proves the transport.
 - **Oracle golden bytes** for the SC codec come from bacpypes3
   (`scripts/sc-golden.py`, cross-checked against bacnet-stack's `bvlc-sc.c`).
   Regenerate and compare with `internal/bacnet/sc/sc_test.go` when a peer
@@ -178,20 +210,32 @@ Done in v1:
 - Metrics, logger, panic isolation, soak tests.
 - BVLL-SC codec (`internal/bacnet/sc`): header/options and all node↔hub
   message bodies, golden-byte cross-checked against bacpypes3, own fuzz target.
-  The transport (TLS 1.3 + WebSocket) and the connect/heartbeat state machine
-  are the next step; see [BACKLOG.md](BACKLOG.md) B1.
 - SC transport (`internal/scnet`): TLS 1.3 + a fuzzed RFC 6455 frame parser,
-  and a node state machine (connect handshake, heartbeats, reconnect/failover)
-  tested against a real in-process TLS hub. Multi-client by construction.
-  Remaining B1 work is wiring the SC leg into the proxy data plane and an
-  independent-peer interop run.
+  a node state machine (connect handshake, heartbeats, reconnect/failover),
+  and inbound filtering (destination VMAC and origin required). Tested against
+  a real in-process TLS hub.
+- SC front leg in the data plane: the `peer` abstraction, VMAC-keyed client
+  identity, opt-in `access.sc_allow`, per-VMAC rate bucket, and the shared
+  pending/replay/COV/write-policy path. Config (`sc:` block and flags),
+  `sc_allow` reload, and an opt-in VMAC list.
+- SC data-plane tests: two clients with the same invoke ID, per-VMAC ACL and
+  rate, write denial with the tagged Error PDU, COV notification routing and
+  I-Am fan-out.
 - bacpypes3 interop: read, Who-Is, denied write, SIGHUP reload to an allowed
   write, uncovered write still denied, read-back of the written value.
 
 Known boundaries:
 
 - No physical-device commissioning yet (see README).
-- No BACnet/SC yet; no BBMD/router; one device per instance.
+- No independent SC-peer interop yet: the remaining B1 step is bacnet-stack's
+  `sc-hub` via Docker. The SC leg is pinned by the in-process TLS hub and the
+  data-plane tests, not yet by a third-party hub.
+- SC admission is VMAC-only. UUID-keyed admission needs Address-Resolution,
+  which the node does not implement; `access.sc_allow` rejects a UUID entry
+  rather than pretending to enforce it.
+- No SC hub role and no SC direct (node-to-node) connections; the proxy is
+  always a WebSocket client of a hub.
+- No BBMD/router; one device per instance.
 - Segmented writes are refused; SubscribeCOVPropertyMultiple is refused.
 - The proxy does not reassemble segmented payloads; it tracks and relays them.
 - `ListenAddr` on macOS cannot use `127.0.0.2`/`127.0.0.3`; tests use separate

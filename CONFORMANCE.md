@@ -51,6 +51,18 @@ the proxy parses or emits: BVLC functions and length semantics, NPDU control
 bits and routing fields, APDU headers and invoke-ID offsets, and the tagged
 Error PDU parameter encoding.
 
+### BACnet/SC codec oracle
+
+The BVLL-SC codec has its own golden-vector oracle. `scripts/sc-golden.py`
+uses bacpypes3's `sc` package to encode every node↔hub body (Result,
+Encapsulated-NPDU, Address-Resolution(+ACK), Advertisement(+solicitation),
+Connect-Request/Accept, Disconnect-Request/ACK, Heartbeat-Request/ACK,
+Proprietary) and the header/option combinations the proxy emits.
+`internal/bacnet/sc/sc_test.go` pins those bytes and was cross-checked against
+bacnet-stack's `src/bacnet/datalink/bsc/bvlc-sc.c`. The transport and node
+state machine are **not** covered by this oracle yet; that is the Docker
+`sc-hub` interop step.
+
 ## Findings
 
 ### 1. Error PDU parameters are tagged ENUMERATEDs
@@ -96,8 +108,13 @@ opaque; the proxy never rewrites a value to satisfy a peer.
 - **No COV interop scenario yet.** COV subscription, cancellation, expiry and
   fan-out are pinned by in-process tests. The Python device could originate
   notifications, but the current interop driver does not exercise them.
-- **No BACnet/SC, BBMD, foreign-device registration or IPv6.** These are
-  outside the v1 scope; see [BACKLOG.md](BACKLOG.md).
+- **No BACnet/SC transport interop yet.** The BVLL-SC codec is golden-byte
+  cross-checked against bacpypes3 and bacnet-stack, and the node is tested
+  against an in-process TLS 1.3 hub. A run against an independent hub
+  (bacnet-stack `sc-hub` via Docker) is the remaining B1 step; see
+  [BACKLOG.md](BACKLOG.md).
+- **No BBMD, foreign-device registration or IPv6.** These are outside the v1
+  scope; see [BACKLOG.md](BACKLOG.md).
 - **No formal conformance suite.** This suite is the anchor; it proves the
   documented behavior against one independent implementation, not certification.
 

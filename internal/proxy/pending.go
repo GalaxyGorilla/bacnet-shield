@@ -10,7 +10,8 @@ import (
 
 // clientKey identifies one client's invoke-ID space. BACnet's invoke ID is
 // one octet and belongs to the client, so the key must include the client
-// address: two clients may both have request 7 outstanding.
+// identity: two clients may both have request 7 outstanding. The identity is
+// a peer key, so an IP client and an SC client can never collide.
 type clientKey struct {
 	addr string
 	id   byte
@@ -18,7 +19,7 @@ type clientKey struct {
 
 // pendingReq is a client request in flight toward the device.
 type pendingReq struct {
-	client    *net.UDPAddr
+	client    peer
 	clientID  byte
 	devID     byte
 	devAddr   *net.UDPAddr // learned from the device's first response
@@ -46,7 +47,7 @@ type covIntent struct {
 // would ask the device to do the work twice.
 type completed struct {
 	hash     [32]byte
-	frame    []byte
+	npdu     []byte
 	deadline time.Time
 }
 
@@ -68,9 +69,9 @@ type deviceExchange struct {
 
 // clientForward is one client's copy of a device-initiated request.
 type clientForward struct {
-	client   *net.UDPAddr
+	client   peer
 	clientID byte
-	frame    []byte
+	npdu     []byte
 }
 
 // allocDevID reserves the lowest free device-leg invoke ID. Caller holds mu.
@@ -100,7 +101,7 @@ func (g *Gateway) detachPendingLocked(id byte) {
 		return
 	}
 	delete(g.pending, id)
-	key := clientKey{p.client.String(), p.clientID}
+	key := clientKey{p.client.Key(), p.clientID}
 	if cur, ok := g.byClient[key]; ok && cur == id {
 		delete(g.byClient, key)
 	}
@@ -140,7 +141,7 @@ func (g *Gateway) allocClientID(addr string) (byte, bool) {
 // entry is dropped first; if none is expired, an arbitrary entry is evicted.
 // Losing a replay entry only costs one extra device round trip, so this is
 // deliberately simpler than a true LRU. Caller holds mu.
-func (g *Gateway) cacheLocked(key clientKey, hash [32]byte, frame []byte, now time.Time) {
+func (g *Gateway) cacheLocked(key clientKey, hash [32]byte, npdu []byte, now time.Time) {
 	if len(g.done) >= maxCompleted {
 		for k, c := range g.done {
 			if now.After(c.deadline) {
@@ -154,7 +155,7 @@ func (g *Gateway) cacheLocked(key clientKey, hash [32]byte, frame []byte, now ti
 			}
 		}
 	}
-	g.done[key] = &completed{hash: hash, frame: frame, deadline: now.Add(completedTTL)}
+	g.done[key] = &completed{hash: hash, npdu: npdu, deadline: now.Add(completedTTL)}
 }
 
 // apduHash identifies a request APDU for retransmission dedupe. The invoke ID
@@ -172,19 +173,19 @@ type covSubKey struct {
 // subscription is one active COV subscription. expires is zero for an
 // indefinite subscription (lifetime 0 in the request).
 type subscription struct {
-	client  *net.UDPAddr
+	client  peer
 	procID  uint32
 	expires time.Time
 }
 
 // addSubLocked installs a subscription. Caller holds mu.
-func (g *Gateway) addSubLocked(obj bacnet.ObjectID, procID uint32, client *net.UDPAddr, expires time.Time) {
+func (g *Gateway) addSubLocked(obj bacnet.ObjectID, procID uint32, client peer, expires time.Time) {
 	subs := g.cov[obj]
 	if subs == nil {
 		subs = make(map[covSubKey]*subscription)
 		g.cov[obj] = subs
 	}
-	key := covSubKey{client.String(), procID}
+	key := covSubKey{client.Key(), procID}
 	if _, ok := subs[key]; !ok {
 		if g.subCount >= maxSubscriptions {
 			return
@@ -217,12 +218,12 @@ func (g *Gateway) removeSubLocked(obj bacnet.ObjectID, procID uint32, client str
 // subscription (some devices echo a different one), it falls back to every
 // subscriber of the object rather than dropping the notification. Caller holds
 // mu.
-func (g *Gateway) subscribersLocked(obj bacnet.ObjectID, procID uint32) []*net.UDPAddr {
+func (g *Gateway) subscribersLocked(obj bacnet.ObjectID, procID uint32) []peer {
 	subs := g.cov[obj]
 	if len(subs) == 0 {
 		return nil
 	}
-	var out []*net.UDPAddr
+	var out []peer
 	for k, s := range subs {
 		if k.procID == procID {
 			out = append(out, s.client)

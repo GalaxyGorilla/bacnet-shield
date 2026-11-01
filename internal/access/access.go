@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet/sc"
 )
 
 // Decision is the outcome of the per-datagram client check. The two denials
@@ -88,22 +89,78 @@ func (l *List) Allowed(ip net.IP) bool {
 	return false
 }
 
+// MACList is a BACnet/SC virtual-MAC allow-list. A nil or empty list admits
+// every node the hub delivers; that is the same documented "no ACL configured"
+// state as the IP leg, and it keeps the SC leg's protection opt-in.
+type MACList struct {
+	macs []sc.MAC
+}
+
+// NewMACList compiles VMAC entries ("aa:bb:cc:dd:ee:ff"). An invalid entry is
+// an error, never a silent skip. The all-zero VMAC and the broadcast VMAC are
+// refused: neither identifies one node, so accepting either as an allow-list
+// entry would not mean what the operator thinks.
+func NewMACList(entries []string) (*MACList, error) {
+	l := &MACList{}
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		m, err := sc.ParseMAC(e)
+		if err != nil {
+			return nil, fmt.Errorf("access: %q is not a BACnet/SC VMAC: %w", e, err)
+		}
+		if m.IsZero() || m.IsBroadcast() {
+			return nil, fmt.Errorf("access: %q is not a unicast VMAC", e)
+		}
+		l.macs = append(l.macs, m)
+	}
+	return l, nil
+}
+
+// Allowed reports whether vmac is on the list. An empty list allows everyone.
+func (l *MACList) Allowed(vmac sc.MAC) bool {
+	if l == nil || len(l.macs) == 0 {
+		return true
+	}
+	for _, m := range l.macs {
+		if m == vmac {
+			return true
+		}
+	}
+	return false
+}
+
 // Policy is the complete front-leg request policy.
 type Policy struct {
 	list  *List
+	scs   *MACList
 	limit *Limit
 	write *WritePolicy
 }
 
-// NewPolicy compiles the three parts. Any of them may be nil/empty.
+// NewPolicy compiles the three IP-leg parts. Any of them may be nil/empty.
 func NewPolicy(list *List, limit *Limit, write *WritePolicy) *Policy {
 	return &Policy{list: list, limit: limit, write: write}
 }
 
-// Check runs the client checks in order: an off-list client never consumes a
-// rate-limit token, so a spoofed-source flood cannot drain another client's
-// budget (and cannot grow the bucket table for clients that may not talk to
-// us at all).
+// WithSCAllow returns a copy of the policy that also admits only the listed
+// BACnet/SC VMACs. An empty list admits every node the hub delivers. The copy
+// keeps a reload from mutating a policy that in-flight requests are using.
+func (p *Policy) WithSCAllow(list *MACList) *Policy {
+	if p == nil {
+		return &Policy{scs: list}
+	}
+	cp := *p
+	cp.scs = list
+	return &cp
+}
+
+// Check runs the IP-leg client checks in order: an off-list client never
+// consumes a rate-limit token, so a spoofed-source flood cannot drain another
+// client's budget (and cannot grow the bucket table for clients that may not
+// talk to us at all).
 func (p *Policy) Check(ip net.IP, now time.Time) Decision {
 	if p == nil {
 		return Allow
@@ -112,6 +169,23 @@ func (p *Policy) Check(ip net.IP, now time.Time) Decision {
 		return DenyACL
 	}
 	if !p.limit.Allow(ip, now) {
+		return DenyRate
+	}
+	return Allow
+}
+
+// CheckSC runs the BACnet/SC client checks. SC nodes are addressed by VMAC,
+// not by IP, so the IP allow-list does not apply; the VMAC allow-list takes
+// its place and the rate bucket is keyed by VMAC. An SC allow-list entry and
+// an IP entry can never share a bucket because the SC key is prefixed.
+func (p *Policy) CheckSC(vmac sc.MAC, now time.Time) Decision {
+	if p == nil {
+		return Allow
+	}
+	if !p.scs.Allowed(vmac) {
+		return DenyACL
+	}
+	if !p.limit.AllowKey("sc:"+vmac.String(), now) {
 		return DenyRate
 	}
 	return Allow
@@ -165,10 +239,17 @@ func NewLimit(ratePerSec float64) *Limit {
 
 // Allow charges one token to the client at ip.
 func (l *Limit) Allow(ip net.IP, now time.Time) bool {
+	return l.AllowKey(ip.String(), now)
+}
+
+// AllowKey charges one token to an arbitrary client identity. The IP leg uses
+// the address string; the SC leg uses a prefixed VMAC. Keeping the key opaque
+// lets both legs share one bounded bucket table without teaching the limiter
+// about either address family.
+func (l *Limit) AllowKey(key string, now time.Time) bool {
 	if l == nil {
 		return true
 	}
-	key := ip.String()
 
 	l.mu.Lock()
 	defer l.mu.Unlock()

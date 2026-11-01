@@ -10,8 +10,9 @@ import (
 	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet"
 )
 
-// handleClient is the front-leg entry point for one datagram. It runs under
-// safego.Dispatch, so a decoder panic costs one datagram, not the gateway.
+// handleClient is the BACnet/IP front-leg entry point for one datagram. It
+// runs under safego.Dispatch, so a decoder panic costs one datagram, not the
+// gateway.
 func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
 	g.metrics.Requests.Inc()
 	now := time.Now()
@@ -30,7 +31,6 @@ func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
 		g.log.Debug("client denied by rate limit", zap.Stringer("client", src))
 		return
 	}
-	g.touchClient(src, now)
 
 	b, err := bacnet.ParseBVLC(dg)
 	if err != nil {
@@ -50,10 +50,21 @@ func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
 			zap.String("function", b.Function.String()), zap.Stringer("client", src))
 		return
 	}
-	n, err := bacnet.ParseNPDU(b.Data)
+
+	p := &udpPeer{addr: src, conn: g.clientConn}
+	g.touchClient(p, now)
+	g.handleClientNPDU(b.Data, p, now, pol)
+}
+
+// handleClientNPDU is the leg-independent half of the front leg: parse the
+// network and application layers, then dispatch. Both the BACnet/IP and
+// BACnet/SC handlers reach this method, so policy and routing cannot drift
+// between the two.
+func (g *Gateway) handleClientNPDU(npdu []byte, p peer, now time.Time, pol *access.Policy) {
+	n, err := bacnet.ParseNPDU(npdu)
 	if err != nil {
 		g.metrics.ParseErrors.Inc()
-		g.log.Debug("client npdu parse", zap.Error(err), zap.Stringer("client", src))
+		g.log.Debug("client npdu parse", zap.Error(err), zap.Stringer("client", p))
 		return
 	}
 	if n.IsNetworkMessage() {
@@ -61,13 +72,13 @@ func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
 		// proxy is not one, and answering would advertise a network it does
 		// not route.
 		g.metrics.Unsupported.Inc()
-		g.log.Debug("client sent a network message", zap.Stringer("client", src))
+		g.log.Debug("client sent a network message", zap.Stringer("client", p))
 		return
 	}
 	a, err := bacnet.ParseAPDU(n.APDU)
 	if err != nil {
 		g.metrics.ParseErrors.Inc()
-		g.log.Debug("client apdu parse", zap.Error(err), zap.Stringer("client", src))
+		g.log.Debug("client apdu parse", zap.Error(err), zap.Stringer("client", p))
 		return
 	}
 
@@ -75,19 +86,19 @@ func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
 	case bacnet.PDUConfirmedRequest:
 		if !a.HasService {
 			g.metrics.ParseErrors.Inc()
-			g.log.Debug("client confirmed request without a service choice", zap.Stringer("client", src))
+			g.log.Debug("client confirmed request without a service choice", zap.Stringer("client", p))
 			return
 		}
-		g.handleClientConfirmed(a, n, src, now, pol)
+		g.handleClientConfirmed(a, n, p, now, pol)
 	case bacnet.PDUUnconfirmedRequest:
-		g.handleClientUnconfirmed(a, n, src, pol)
+		g.handleClientUnconfirmed(a, n, p, pol)
 	default:
-		g.handleClientResponse(a, n, src, now)
+		g.handleClientResponse(a, n, p, now)
 	}
 }
 
 // handleClientConfirmed gates and forwards a confirmed request.
-func (g *Gateway) handleClientConfirmed(a bacnet.APDU, n bacnet.NPDU, src *net.UDPAddr, now time.Time, pol *access.Policy) {
+func (g *Gateway) handleClientConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, now time.Time, pol *access.Policy) {
 	// SubscribeCOVPropertyMultiple carries a list of subscriptions. v1
 	// tracks one monitored object per subscription, so it cannot route the
 	// notifications of a multiple subscription. Denying it with a BACnet
@@ -98,18 +109,18 @@ func (g *Gateway) handleClientConfirmed(a bacnet.APDU, n bacnet.NPDU, src *net.U
 		(a.Segmented && (a.Service == bacnet.ServiceSubscribeCOV || a.Service == bacnet.ServiceSubscribeCOVProperty)) {
 		g.metrics.Unsupported.Inc()
 		g.log.Info("unsupported subscription request",
-			zap.Stringer("client", src), zap.Uint8("service", uint8(a.Service)))
-		g.sendClientError(src, a, bacnet.ErrorClassServices, bacnet.ErrorCodeServiceRequestDenied)
+			zap.Stringer("client", p), zap.Uint8("service", uint8(a.Service)))
+		g.sendClientError(p, a, bacnet.ErrorClassServices, bacnet.ErrorCodeServiceRequestDenied)
 		return
 	}
 
 	if !pol.AllowWrite(a) {
 		g.metrics.WritesDenied.Inc()
 		g.log.Info("write denied by policy",
-			zap.Stringer("client", src),
+			zap.Stringer("client", p),
 			zap.Uint8("service", uint8(a.Service)),
 			zap.Uint8("invoke_id", a.InvokeID))
-		g.sendClientError(src, a, bacnet.ErrorClassSecurity, bacnet.ErrorCodeWriteAccessDenied)
+		g.sendClientError(p, a, bacnet.ErrorClassSecurity, bacnet.ErrorCodeWriteAccessDenied)
 		return
 	}
 
@@ -117,29 +128,29 @@ func (g *Gateway) handleClientConfirmed(a bacnet.APDU, n bacnet.NPDU, src *net.U
 	if obj, procID, lifetime, hasLifetime, ok := bacnet.COVSubscription(a); ok {
 		intent = &covIntent{object: obj, procID: procID, lifetime: lifetime, hasLifetime: hasLifetime}
 	}
-	g.forwardConfirmed(a, n, src, now, intent)
+	g.forwardConfirmed(a, n, p, now, intent)
 }
 
 // forwardConfirmed allocates a device-leg invoke ID (or reuses the one already
 // assigned to this client/invoke-ID pair), rewrites the octet, and sends the
 // request to the device.
-func (g *Gateway) forwardConfirmed(a bacnet.APDU, n bacnet.NPDU, src *net.UDPAddr, now time.Time, intent *covIntent) {
-	key := clientKey{src.String(), a.InvokeID}
+func (g *Gateway) forwardConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, now time.Time, intent *covIntent) {
+	key := clientKey{p.Key(), a.InvokeID}
 	hash := apduHash(n.APDU)
 
 	g.mu.Lock()
 	var staleID byte
 	var haveStale bool
 	if devID, ok := g.byClient[key]; ok {
-		if p := g.pending[devID]; p != nil {
+		if pending := g.pending[devID]; pending != nil {
 			switch {
-			case p.complete:
+			case pending.complete:
 				// The response finished; a request with the same invoke ID
 				// is a new exchange, not a retransmission.
 				g.detachPendingLocked(devID)
 				staleID, haveStale = devID, true
 				delete(g.done, key)
-			case p.hash == hash:
+			case pending.hash == hash:
 				// A BACnet retransmission while the request is still in
 				// flight. It is dropped, not forwarded: the device already
 				// has the request, and re-sending a write would apply it
@@ -148,22 +159,22 @@ func (g *Gateway) forwardConfirmed(a bacnet.APDU, n bacnet.NPDU, src *net.UDPAdd
 				g.mu.Unlock()
 				g.metrics.Retransmits.Inc()
 				g.log.Debug("dropping a retransmission already in flight",
-					zap.Stringer("client", src), zap.Uint8("invoke_id", a.InvokeID))
+					zap.Stringer("client", p), zap.Uint8("invoke_id", a.InvokeID))
 				return
-			case a.Segmented && p.segmented && p.service == a.Service:
+			case a.Segmented && pending.segmented && pending.service == a.Service:
 				// A later segment of a segmented request. It shares the
 				// device-leg invoke ID; only the sequence number changes.
-				devID := p.devID
+				devID := pending.devID
 				apdu := append([]byte(nil), n.APDU...)
 				if err := bacnet.PatchInvokeID(apdu, devID); err != nil {
 					g.mu.Unlock()
 					g.metrics.ParseErrors.Inc()
-					g.log.Debug("client segment patch", zap.Error(err), zap.Stringer("client", src))
+					g.log.Debug("client segment patch", zap.Error(err), zap.Stringer("client", p))
 					return
 				}
 				frame := buildFrame(n, apdu)
-				p.fwd = frame
-				p.deadline = now.Add(g.cfg.RequestTimeout)
+				pending.fwd = frame
+				pending.deadline = now.Add(g.cfg.RequestTimeout)
 				g.mu.Unlock()
 				g.metrics.Forwarded.Inc()
 				g.sendDevice(frame)
@@ -181,10 +192,10 @@ func (g *Gateway) forwardConfirmed(a bacnet.APDU, n bacnet.NPDU, src *net.UDPAdd
 	}
 	if c, ok := g.done[key]; ok {
 		if c.hash == hash {
-			frame := c.frame
+			npdu := c.npdu
 			g.mu.Unlock()
 			g.metrics.Replayed.Inc()
-			g.sendClient(frame, src)
+			g.sendClientNPDU(npdu, p)
 			return
 		}
 		delete(g.done, key)
@@ -197,7 +208,7 @@ func (g *Gateway) forwardConfirmed(a bacnet.APDU, n bacnet.NPDU, src *net.UDPAdd
 		g.mu.Unlock()
 		g.metrics.PendingFull.Inc()
 		g.log.Warn("pending table full",
-			zap.Stringer("client", src), zap.Uint8("invoke_id", a.InvokeID))
+			zap.Stringer("client", p), zap.Uint8("invoke_id", a.InvokeID))
 		return
 	}
 	devID, ok := g.allocDevID()
@@ -208,7 +219,7 @@ func (g *Gateway) forwardConfirmed(a bacnet.APDU, n bacnet.NPDU, src *net.UDPAdd
 		g.mu.Unlock()
 		g.metrics.PendingFull.Inc()
 		g.log.Warn("no free device invoke id",
-			zap.Stringer("client", src), zap.Uint8("invoke_id", a.InvokeID))
+			zap.Stringer("client", p), zap.Uint8("invoke_id", a.InvokeID))
 		return
 	}
 	if haveStale {
@@ -219,12 +230,12 @@ func (g *Gateway) forwardConfirmed(a bacnet.APDU, n bacnet.NPDU, src *net.UDPAdd
 		g.freeDevID(devID)
 		g.mu.Unlock()
 		g.metrics.ParseErrors.Inc()
-		g.log.Debug("client request patch", zap.Error(err), zap.Stringer("client", src))
+		g.log.Debug("client request patch", zap.Error(err), zap.Stringer("client", p))
 		return
 	}
 	frame := buildFrame(n, apdu)
 	g.pending[devID] = &pendingReq{
-		client:    src,
+		client:    p,
 		clientID:  a.InvokeID,
 		devID:     devID,
 		service:   a.Service,
@@ -245,11 +256,11 @@ func (g *Gateway) forwardConfirmed(a bacnet.APDU, n bacnet.NPDU, src *net.UDPAdd
 // handleClientUnconfirmed forwards an unconfirmed request (Who-Is, Who-Has,
 // WriteGroup, TimeSynchronization, ...). Unconfirmed writes still change the
 // device, so the policy gates them before anything leaves the box.
-func (g *Gateway) handleClientUnconfirmed(a bacnet.APDU, n bacnet.NPDU, src *net.UDPAddr, pol *access.Policy) {
+func (g *Gateway) handleClientUnconfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, pol *access.Policy) {
 	if !pol.AllowWrite(a) {
 		g.metrics.WritesDenied.Inc()
 		g.log.Info("unconfirmed write denied by policy",
-			zap.Stringer("client", src), zap.Uint8("service", uint8(a.Service)))
+			zap.Stringer("client", p), zap.Uint8("service", uint8(a.Service)))
 		return
 	}
 	frame := buildFrame(n, n.APDU)
@@ -264,8 +275,8 @@ func (g *Gateway) handleClientUnconfirmed(a bacnet.APDU, n bacnet.NPDU, src *net
 //     notification): toDevice maps it back to the device's invoke ID;
 //   - a SegmentACK for a segmented response to the client's own request:
 //     byClient maps the client's invoke ID to the device-leg one.
-func (g *Gateway) handleClientResponse(a bacnet.APDU, n bacnet.NPDU, src *net.UDPAddr, now time.Time) {
-	key := clientKey{src.String(), a.InvokeID}
+func (g *Gateway) handleClientResponse(a bacnet.APDU, n bacnet.NPDU, p peer, now time.Time) {
+	key := clientKey{p.Key(), a.InvokeID}
 
 	g.mu.Lock()
 	if devID, ok := g.toDevice[key]; ok {
@@ -279,7 +290,7 @@ func (g *Gateway) handleClientResponse(a bacnet.APDU, n bacnet.NPDU, src *net.UD
 		if err := bacnet.PatchInvokeID(apdu, devID); err != nil {
 			g.mu.Unlock()
 			g.metrics.ParseErrors.Inc()
-			g.log.Debug("client answer patch", zap.Error(err), zap.Stringer("client", src))
+			g.log.Debug("client answer patch", zap.Error(err), zap.Stringer("client", p))
 			return
 		}
 		frame := buildFrame(n, apdu)
@@ -294,8 +305,8 @@ func (g *Gateway) handleClientResponse(a bacnet.APDU, n bacnet.NPDU, src *net.UD
 		return
 	}
 	if devID, ok := g.byClient[key]; ok {
-		p := g.pending[devID]
-		if p == nil {
+		pending := g.pending[devID]
+		if pending == nil {
 			g.mu.Unlock()
 			return
 		}
@@ -303,25 +314,25 @@ func (g *Gateway) handleClientResponse(a bacnet.APDU, n bacnet.NPDU, src *net.UD
 		if err := bacnet.PatchInvokeID(apdu, devID); err != nil {
 			g.mu.Unlock()
 			g.metrics.ParseErrors.Inc()
-			g.log.Debug("client segment-ack patch", zap.Error(err), zap.Stringer("client", src))
+			g.log.Debug("client segment-ack patch", zap.Error(err), zap.Stringer("client", p))
 			return
 		}
 		frame := buildFrame(n, apdu)
-		p.deadline = now.Add(g.cfg.RequestTimeout)
-		devAddr := p.devAddr
+		pending.deadline = now.Add(g.cfg.RequestTimeout)
+		devAddr := pending.devAddr
 		g.mu.Unlock()
 		g.sendDeviceTo(frame, devAddr)
 		return
 	}
 	g.mu.Unlock()
 	g.log.Debug("client sent a response with no pending request",
-		zap.Stringer("client", src), zap.String("pdu", a.Type.String()), zap.Uint8("invoke_id", a.InvokeID))
+		zap.Stringer("client", p), zap.String("pdu", a.Type.String()), zap.Uint8("invoke_id", a.InvokeID))
 }
 
 // sendClientError answers a denied request with a locally generated Error PDU.
 // The invoke ID and service choice echo the request: a client correlates the
 // answer by them, and a mismatch looks like a timeout.
-func (g *Gateway) sendClientError(src *net.UDPAddr, a bacnet.APDU, class bacnet.ErrorClass, code bacnet.ErrorCode) {
+func (g *Gateway) sendClientError(p peer, a bacnet.APDU, class bacnet.ErrorClass, code bacnet.ErrorCode) {
 	errAPDU := bacnet.ErrorAPDU(a.InvokeID, a.Service, class, code)
-	g.sendClient(buildFrame(bacnet.NPDU{}, errAPDU.Marshal()), src)
+	g.sendClientNPDU(buildNPDU(bacnet.NPDU{}, errAPDU.Marshal()), p)
 }

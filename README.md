@@ -4,13 +4,17 @@ A **BACnet/IP security proxy** for one legacy building device. One static
 binary. The device keeps speaking plain BACnet/IP; the proxy does the
 shielding work between it and the building's clients.
 
-**Status:** v1 software scope complete. The protocol codecs are fuzzed, the
-data plane is race-tested, and an independent stack (bacpypes3) drives reads,
-writes, COV routing and policy denials through the built binary. Physical
-device commissioning is still required; see [Production readiness](#production-readiness).
+**Status:** the documented v1 data plane is complete, and the BACnet/SC secure
+front leg now shares it. The protocol codecs are fuzzed, the data plane is
+race-tested, and an independent stack (bacpypes3) drives reads, writes, COV
+routing and policy denials through the built binary. The SC leg has been driven
+against an in-process TLS hub; an interop run against bacnet-stack's `sc-hub`
+is the remaining B1 step. Physical device commissioning is still required; see
+[Production readiness](#production-readiness).
 
 ```
 [N clients] --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [legacy device]
+[N SC nodes] --BACnet/SC--> [existing hub] --> [bacnet-shield] --BACnet/IP-->
 ```
 
 Clients keep using their existing BACnet tools. They point at the proxy instead
@@ -39,6 +43,9 @@ bacnet-shield is the boundary instead:
   immediately instead of timing out.
 - **COV routing** — a client's SubscribeCOV is remembered, and the device's
   notifications are delivered back to that client.
+- **Secure front leg** — BACnet/SC clients attach through an existing hub over
+  TLS 1.3 + WebSocket; they get the same allow-list, rate limit, write policy
+  and COV routing as the IP clients, each keyed by its own VMAC.
 - **Config reload without downtime** — `SIGHUP` swaps the front-leg policy in
   place; clients and the device socket stay up.
 
@@ -50,15 +57,58 @@ router.
 | Supported | Deliberately not supported (v1) |
 |---|---|
 | One legacy BACnet/IP device per instance | BBMD, foreign-device registration, routing between networks |
-| Unicast and broadcast client frames to that device | BACnet/SC (secure connect) front leg |
+| BACnet/IP clients, unicast and broadcast | A BACnet/SC **hub**: the proxy is a node, not a hub |
+| BACnet/SC clients through an existing hub | SC direct (node-to-node) connections |
 | Confirmed and unconfirmed services, payload opaque | Service translation or object/property remapping |
 | SubscribeCOV and SubscribeCOVProperty (one object each) | SubscribeCOVPropertyMultiple |
 | Segmented requests and responses (except segmented writes) | Segmented writes (denied fail-closed) |
-| IPv4 BACnet/IP | BACnet/IPv6 |
+| IPv4 BACnet/IP on the device leg | BACnet/IPv6 |
 
-BACnet/SC is the planned standard secure front leg for a later milestone
-(TLS 1.3 + WebSocket, BVLC-SC `0x82`). It is deliberately not replaced by a
-private tunnel: the point is a standard boundary, not another proprietary one.
+BACnet/SC is the standard secure front leg (TLS 1.3 + WebSocket, BVLC-SC
+`0x82`). It is deliberately not replaced by a private tunnel: the point is a
+standard boundary, not another proprietary one.
+
+## BACnet/SC
+
+The proxy attaches to an **existing** hub as one node, so the hub keeps doing
+its job: authenticating connections and routing between nodes. The clear device
+leg stays plain BACnet/IP, exactly as in the IP-only deployment.
+
+```yaml
+sc:
+  vmac: "02:00:00:00:00:01"
+  uuid: "00112233-4455-6677-8899-aabbccddeeff"
+  hubs:                       # primary first, failover after
+    - "wss://hub1.example:47808/"
+    - "wss://hub2.example:47808/"
+  ca_file: "/etc/bacnet-shield/hub-ca.pem"   # optional; default is system roots
+  # cert_file: "/etc/bacnet-shield/node.pem" # optional client certificate
+  # key_file:  "/etc/bacnet-shield/node.key"
+
+access:
+  sc_allow:                   # optional; empty = accept whatever the hub sends
+    - "02:00:00:00:00:0a"
+    - "02:00:00:00:00:0b"
+```
+
+Every SC sender is identified by its **VMAC**, so SC clients are independent:
+two nodes may use the same invoke ID, and each has its own rate bucket, replay
+cache, pending requests and COV subscriptions. `sc_allow` is a second gate
+behind hub authentication; with no list configured, admission is opt-in like
+every other Shield control.
+
+The proxy rejects a node's frame addressed to another VMAC and a frame without
+an originating VMAC, even though the hub should already have routed it
+correctly. It does not implement address resolution, so the allow-list is keyed
+by VMAC only; a UUID-keyed rule would need that exchange and is backlog.
+
+Flags mode has the same surface: `--sc-vmac`, `--sc-uuid`, `--sc-hub`,
+`--sc-ca`, `--sc-cert`, `--sc-key` and `--sc-allow`.
+
+A hub outage does not stop the IP leg: the node logs the failure and reconnects
+with backoff across the configured hub list. Systemd readiness means the IP
+listener is bound; the SC connection state is logged, not used as a readiness
+gate.
 
 ## Quick start
 
@@ -101,9 +151,10 @@ kill -HUP "$(cat /run/bacnet-shield.pid)"
 ```
 
 `listen_addr`, `device_addr`, `device_local_addr`, `device_instance`,
-`request_timeout_secs`, `max_pending`, `log_level` and `metrics.addr` need a
-restart; a reload reports them as warnings instead of silently keeping the old
-value.
+`request_timeout_secs`, `max_pending`, `log_level`, `metrics.addr` and the
+whole `sc` block (VMAC, UUID, hubs, TLS) need a restart; a reload reports them
+as warnings instead of silently keeping the old value. The `access` block,
+including `sc_allow`, is reloadable.
 
 ### Write policy
 
@@ -154,7 +205,10 @@ filter reads should set it explicitly.
 
 ## How it works
 
-The proxy is a strict forwarder with three pieces of state:
+The proxy is a strict forwarder with three pieces of state. Both front legs
+feed the same state: a client is a client whether its identity is `ip:port` or
+a 6-octet SC VMAC, which is what keeps two SC nodes from sharing an invoke-ID
+space.
 
 1. **Invoke-ID translation.** Every client has its own one-octet invoke-ID
    space, so two clients may both have request 7 in flight. The proxy allocates
@@ -192,11 +246,11 @@ Set `metrics.addr` (or `--metrics-addr`) to expose a Prometheus scrape at
 
 | Metric | Meaning |
 |---|---|
-| `bacnet_shield_requests_total` | Client-leg datagrams received |
+| `bacnet_shield_requests_total` | Client-leg NPDUs received (IP or SC) |
 | `bacnet_shield_forwarded_total` | Requests forwarded to the device leg |
 | `bacnet_shield_responses_total` | Device answers relayed to a client |
-| `bacnet_shield_acl_denied_total` | Datagrams dropped by the allow-list |
-| `bacnet_shield_rate_limited_total` | Datagrams dropped by the per-client rate limit |
+| `bacnet_shield_acl_denied_total` | Requests dropped by the IP or SC allow-list |
+| `bacnet_shield_rate_limited_total` | Requests dropped by the per-client rate limit |
 | `bacnet_shield_writes_denied_total` | Writes refused by the write policy |
 | `bacnet_shield_parse_errors_total` | Undecodable datagrams dropped |
 | `bacnet_shield_pending_full_total` | Requests dropped because every invoke ID was in flight |
@@ -275,6 +329,13 @@ It exits 77 when Python or the peer is missing, so a bare machine stays green;
 a release run treats that as a failure. See [TESTING.md](TESTING.md) for the
 layers and [CONFORMANCE.md](CONFORMANCE.md) for what the independent stack
 found.
+
+The SC leg is covered by the same races: the BVLL-SC codec is golden-byte
+cross-checked against bacpypes3, the WebSocket parser is fuzzed, and the node is
+driven against a real in-process TLS hub (connect, heartbeat, reconnect,
+destination filtering). Proxy tests then drive two SC nodes with the same invoke
+ID through the shared data plane. The independent bacnet-stack `sc-hub` run is
+the remaining B1 interop step.
 
 ## Documentation
 

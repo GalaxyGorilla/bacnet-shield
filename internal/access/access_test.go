@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet/sc"
 )
 
 // writeProperty builds a WriteProperty APDU for one object/property.
@@ -104,6 +105,82 @@ func TestLimitTableCapAndSweep(t *testing.T) {
 	// After the idle horizon the sweep must make room again.
 	if !l.Allow(fresh, now.Add(bucketIdleTime+gcInterval)) {
 		t.Fatal("sweep did not free idle buckets")
+	}
+}
+
+func TestMACList(t *testing.T) {
+	a := sc.MAC{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
+	b := sc.MAC{0x02, 0x00, 0x00, 0x00, 0x00, 0x02}
+
+	empty, err := NewMACList(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !empty.Allowed(a) {
+		t.Fatal("empty list did not admit everything (protection must be opt-in)")
+	}
+	if _, err := NewMACList([]string{"not-a-mac"}); err == nil {
+		t.Fatal("invalid entry accepted")
+	}
+	for _, bad := range []string{sc.MAC{}.String(), sc.BroadcastMAC.String()} {
+		if _, err := NewMACList([]string{bad}); err == nil {
+			t.Fatalf("%q accepted as a unicast allow-list entry", bad)
+		}
+	}
+
+	l, err := NewMACList([]string{a.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.Allowed(a) {
+		t.Fatal("listed VMAC refused")
+	}
+	if l.Allowed(b) {
+		t.Fatal("unlisted VMAC admitted")
+	}
+}
+
+func TestPolicyCheckSC(t *testing.T) {
+	a := sc.MAC{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
+	b := sc.MAC{0x02, 0x00, 0x00, 0x00, 0x00, 0x02}
+	now := time.Unix(3000, 0)
+
+	list, err := NewMACList([]string{a.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewPolicy(nil, NewLimit(1), nil).WithSCAllow(list)
+
+	if d := p.CheckSC(a, now); d != Allow {
+		t.Fatalf("listed VMAC = %v, want allow", d)
+	}
+	if d := p.CheckSC(a, now); d != DenyRate {
+		t.Fatalf("second request from the same VMAC = %v, want rate", d)
+	}
+	// Off-list is checked before the rate limit, so it never consumes a
+	// token (and, importantly, cannot exhaust another node's budget).
+	if d := p.CheckSC(b, now); d != DenyACL {
+		t.Fatalf("unlisted VMAC = %v, want acl", d)
+	}
+	if d := p.CheckSC(b, now); d != DenyACL {
+		t.Fatalf("unlisted VMAC is still not a rate denial: %v", d)
+	}
+	// A different listed VMAC has its own bucket.
+	list2, err := NewMACList([]string{a.String(), b.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2 := NewPolicy(nil, NewLimit(1), nil).WithSCAllow(list2)
+	if d := p2.CheckSC(b, now); d != Allow {
+		t.Fatalf("second listed VMAC = %v, want allow", d)
+	}
+
+	// The SC allow-list does not leak into the IP leg, and vice versa.
+	if d := p.Check(net.ParseIP("192.0.2.1"), now); d != Allow {
+		t.Fatalf("IP leg = %v, want allow (no IP list configured)", d)
+	}
+	if d := (*Policy)(nil).CheckSC(b, now); d != Allow {
+		t.Fatalf("nil policy = %v, want allow", d)
 	}
 }
 

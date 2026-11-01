@@ -2,14 +2,15 @@
 # One file = one proxy instance in front of ONE legacy BACnet/IP device.
 #
 #   [N clients] --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [legacy device]
+#   [N SC nodes] --BACnet/SC--> [existing hub] --> [bacnet-shield] --BACnet/IP-->
 #
 # Run:    bacnet-shield gateway --config /etc/bacnet-shield/gateway.yaml
 # Reload: kill -HUP <pid>   (swaps the access policy in place)
-#   Applies: access.allow, access.rate_per_sec, access.read_only,
-#            access.write_policy.
+#   Applies: access.allow, access.sc_allow, access.rate_per_sec,
+#            access.read_only, access.write_policy.
 #   Needs a restart (logged as warnings): listen_addr, device_addr,
 #            device_local_addr, device_instance, request_timeout_secs,
-#            max_pending, log_level, metrics.addr.
+#            max_pending, log_level, metrics.addr and the sc block.
 # Or without a file (single device, flags only):
 #   bacnet-shield gateway --listen :47808 --device 10.0.0.42:47808 --read-only
 #
@@ -43,6 +44,20 @@ max_pending: 256
 
 log_level: info # debug | info | warn | error
 
+# Optional BACnet/SC secure front leg. The proxy attaches to an EXISTING hub as
+# a node; it does not implement a hub. Omit this whole block to run the IP leg
+# only. The clear device leg stays plain BACnet/IP.
+#
+# sc:
+#   vmac: "02:00:00:00:00:01"                     # required, unicast, unique
+#   uuid: "00112233-4455-6677-8899-aabbccddeeff"  # required
+#   hubs:                                         # primary first, failover after
+#     - "wss://hub1.example:47808/"
+#     - "wss://hub2.example:47808/"
+#   ca_file: "/etc/bacnet-shield/hub-ca.pem"      # optional; system roots if unset
+#   cert_file: "/etc/bacnet-shield/node.pem"      # optional client certificate
+#   key_file: "/etc/bacnet-shield/node.key"       # cert_file and key_file go together
+
 access:
   # Client allow-list (IPs or CIDRs). Empty/omitted = every client.
   # An off-list datagram is dropped silently: answering it would tell a
@@ -50,6 +65,13 @@ access:
   allow:
     - "10.8.0.0/24"   # BMS / SCADA segment
     - "192.168.1.7"   # one engineering workstation
+
+  # BACnet/SC client allow-list, keyed by VMAC. Empty/omitted = every node the
+  # hub delivers is accepted (protection is opt-in, like `allow`). This is a
+  # second gate behind hub authentication, not a replacement for it.
+  # sc_allow:
+  #   - "02:00:00:00:00:0a"
+  #   - "02:00:00:00:00:0b"
 
   # Per-client token bucket (requests/second, burst = rate). Protects the
   # device from a polling storm and the proxy from a spoofed-source flood.

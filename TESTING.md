@@ -7,13 +7,15 @@ local `make` target.
 | Layer | Evidence |
 |---|---|
 | Codecs | BVLC, NPDU, APDU, tags, object IDs and write targets; malformed, truncated, extended-tag and segmented vectors |
-| Fuzzing | Six native fuzz targets (`FuzzParseBVLC`, `FuzzParseNPDU`, `FuzzParseAPDU`, `FuzzParseObjectID`, `FuzzWriteTargets`, `FuzzTagReader`) |
-| Policy | Allow-list, per-client rate limit, read-only, scoped write rules, deny-overrides, allow-must-cover, service-level writes |
+| Fuzzing | Eight native targets: `FuzzParseBVLC`, `FuzzParseNPDU`, `FuzzParseAPDU`, `FuzzParseObjectID`, `FuzzWriteTargets`, `FuzzTagReader`, `FuzzParse` (BVLL-SC) and `FuzzParseFrame` (WebSocket) |
+| Policy | Allow-list, per-client rate limit, read-only, scoped write rules, deny-overrides, allow-must-cover, service-level writes; SC VMAC allow-list and per-VMAC bucket |
 | Data plane | Real loopback UDP sockets, invoke-ID collision and reuse, retransmission dedupe, pending cap/expiry, routing strip, device source validation |
+| SC transport | Real in-process TLS 1.3 hub: connect handshake, heartbeat, reconnect/failover, hostname verification, destination/origin filtering |
+| SC data plane | In-memory SC leg: two clients with the same invoke ID, per-VMAC ACL/rate, write denial shape, COV routing, I-Am fan-out, shared replay/pending |
 | COV | Subscription install after ACK, rejected subscription not routed, cancellation, expiry, multi-client fan-out, unroutable confirmed notification |
 | Segments | Segmented responses and device requests relayed with per-invoke tracking; segmented writes denied |
-| Lifecycle | Config validation, reload, restart-only warnings, invalid reload, shutdown, systemd readiness and watchdog |
-| Independent peer | bacpypes3 0.0.110 drives the built binary as both client and device |
+| Lifecycle | Config validation, reload, restart-only warnings, invalid reload, shutdown, systemd readiness and watchdog; SC config validation and TLS file errors |
+| Independent peer | bacpypes3 0.0.110 drives the built binary as both client and device; BVLL-SC golden bytes come from the same peer |
 | Soak | Spoofed-source rate-limit flood; steady-state forwarding with flat goroutines/heap and zero unanswered requests |
 
 ## Commands
@@ -52,6 +54,13 @@ missing, so a bare machine stays green. A release run treats both as failures.
 - A device response from an unexpected source is rejected; a changed source
   port is learned only after a legitimate response.
 - A malformed datagram costs one datagram, not the process.
+- Two SC nodes using the same invoke ID get their own answers addressed to
+  their own VMAC; a node's frame addressed to another VMAC or with no origin is
+  dropped.
+- An off-list SC VMAC is silent and never reaches the device; a noisy node
+  cannot spend another VMAC's rate tokens.
+- A denied SC write gets the same tagged Error PDU as the IP leg, and the
+  device never sees it.
 - An invalid reload keeps the running policy.
 - A bind failure exits without advertising systemd readiness.
 

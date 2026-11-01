@@ -13,28 +13,42 @@ network segment trustworthy.
 - Integrity of the running policy across configuration reloads.
 - The client↔device mapping: an answer is delivered to the client that asked,
   never to a third party.
+- SC client admission: the opt-in VMAC allow-list and the per-VMAC mapping.
 
 ## Trust boundaries
 
 The appliance host, configuration file and administrators are trusted. A
 one-box gateway leaves the final proxy-to-device BACnet/IP leg clear;
-physically protect or isolate that segment. BACnet/SC (TLS 1.3 + WebSocket) is
-the planned standard secure front leg for a later milestone and is not present
-in v1.
+physically protect or isolate that segment.
+
+The BACnet/SC front leg (TLS 1.3 + WebSocket, BVLC-SC `0x82`) secures the
+client side only. The proxy is a **node** of an existing hub; it is not a hub.
+The hub is the trust anchor for the SC side: it terminates TLS, admits nodes and
+is responsible for attributing a frame to the VMAC it claims. The proxy's
+`access.sc_allow` is a second, opt-in gate for that authenticated identity, not
+a replacement for hub admission. Use a hub whose node authentication matches the
+site's identity requirements.
 
 Client IP allow-lists are network policy, not cryptographic identity: BACnet/IP
 is unauthenticated, so any host on an allowed network can claim any device
-instance. Use BACnet/SC, and identity-aware network controls, when identity
-must survive NAT or a shared client network. The legacy device and all wire
-input are treated as malformed or hostile, but a compromised device can still
-return plausible false process data.
+instance. BACnet/SC gives cryptographic transport identity up to the hub, but a
+compromised hub or node is still inside that boundary. The legacy device and all
+wire input are treated as malformed or hostile, but a compromised device can
+still return plausible false process data.
 
 ## Enforced controls
 
 - Strict BVLC/NPDU/APDU framing with bounded lengths; only Original-Unicast and
   Original-Broadcast are accepted, and routing fields are stripped.
 - Client allow-list and a per-client token-bucket rate limit; an off-list
-  source never consumes another client's budget.
+  source never consumes another client's budget. The SC leg has a VMAC
+  allow-list and a VMAC-keyed bucket; an IP allow-list entry and a VMAC entry
+  never share a bucket.
+- SC transport is TLS 1.3 only, with hub certificate verification (system roots
+  or a configured CA) and an optional client certificate. A plaintext `ws://`
+  hub is rejected outside tests.
+- The SC node drops an `Encapsulated-NPDU` addressed to another VMAC and one
+  without a nonzero origin, even if the hub delivered it.
 - Read-only mode or an `<object-type>:<instance>:<property>` write policy with
   deny-overrides and allow-must-cover semantics.
 - Undecodable and segmented writes are denied fail-closed, before forwarding.
@@ -59,6 +73,17 @@ answered with a BACnet Error PDU (see [README.md](README.md)).
   BBMD. It forwards one device's traffic and gates the client leg.
 - The one-box deployment does not encrypt or authenticate the legacy device
   leg; that leg is trusted at the network layer.
+- The proxy does not authenticate SC nodes itself; it trusts the hub to do so.
+  `access.sc_allow` can narrow that set by VMAC, but it cannot detect a hub
+  that misattributes a frame.
+- SC admission is VMAC-only today. UUID-keyed admission requires
+  Address-Resolution, which the node does not implement; a UUID entry in
+  `sc_allow` is rejected rather than silently unenforced.
+- The proxy is not an SC hub and does not accept SC direct connections.
+- SC per-client state is keyed by VMAC and outlives a hub reconnect for its
+  normal expiry window (pending timeout, 30 s replay cache, 5 min idle). A hub
+  that lets a different node reuse a VMAC would inherit that state; VMAC
+  uniqueness across the hub's lifetime is a hub responsibility.
 - Rate limits reduce abuse but cannot guarantee availability under host,
   network or upstream-device exhaustion.
 - Write protection is opt-in: with neither `read_only` nor `write_policy`

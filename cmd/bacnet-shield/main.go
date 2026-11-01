@@ -11,15 +11,19 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"reflect"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/pflag"
 	"go.uber.org/zap"
 
+	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet/sc"
 	"github.com/GalaxyGorilla/bacnet-shield/internal/config"
 	"github.com/GalaxyGorilla/bacnet-shield/internal/observ"
 	"github.com/GalaxyGorilla/bacnet-shield/internal/proxy"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/scnet"
 	"github.com/GalaxyGorilla/bacnet-shield/internal/watchdog"
 )
 
@@ -131,6 +135,21 @@ func runGateway(args []string) int {
 		return 1
 	}
 
+	var scNode *scnet.Node
+	if cfg.SC.Enabled() {
+		scNode, err = buildSCNode(cfg.SC, log)
+		if err != nil {
+			if metricsLn != nil {
+				_ = metricsLn.Close()
+			}
+			log.Error("build bacnet/sc leg", zap.Error(err))
+			return 1
+		}
+		// Attach before Serve: a hub can deliver an NPDU as soon as the node
+		// connects, and the handler must already be in place.
+		g.AttachSC(scNode)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	served := make(chan struct{})
@@ -138,6 +157,13 @@ func runGateway(args []string) int {
 		defer close(served)
 		_ = g.Serve(ctx)
 	}()
+	if scNode != nil {
+		go func() {
+			if err := scNode.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Error("bacnet/sc node stopped", zap.Error(err))
+			}
+		}()
+	}
 
 	if metricsLn != nil {
 		go func() {
@@ -152,6 +178,11 @@ func runGateway(args []string) int {
 		zap.String("device", cfg.DeviceAddr),
 		zap.String("device_local", g.DeviceLocalAddr().String()),
 		zap.Int("max_pending", cfg.MaxPending))
+	if scNode != nil {
+		log.Info("bacnet/sc leg configured",
+			zap.String("vmac", cfg.SC.VMAC),
+			zap.Strings("hubs", cfg.SC.Hubs))
+	}
 
 	if wd := watchdog.Interval(); wd > 0 {
 		log.Info("systemd watchdog enabled", zap.Duration("interval", wd))
@@ -220,6 +251,30 @@ func reload(o *config.Options, cur *config.Config, g *proxy.Gateway, log *zap.Lo
 	log.Info("SIGHUP: access policy reloaded")
 }
 
+// buildSCNode turns the validated sc block into a node. Validation already
+// checked the VMAC/UUID/URL shapes; this is the point where a bad certificate
+// or key file becomes a startup error rather than a reconnect loop.
+func buildSCNode(s config.SC, log *zap.Logger) (*scnet.Node, error) {
+	vmac, err := sc.ParseMAC(s.VMAC)
+	if err != nil {
+		return nil, err
+	}
+	uuid, err := sc.ParseUUID(s.UUID)
+	if err != nil {
+		return nil, err
+	}
+	tlsCfg, err := scnet.ClientTLS(s.CAFile, s.CertFile, s.KeyFile)
+	if err != nil {
+		return nil, err
+	}
+	return scnet.NewNode(scnet.NodeConfig{
+		VMAC: vmac,
+		UUID: uuid,
+		Hubs: s.Hubs,
+		TLS:  tlsCfg,
+	}, log)
+}
+
 // restartOnlyChanges names the fields a reload cannot apply. Reporting them is
 // the honest half of a partial reload: silently keeping the old listener while
 // the file says otherwise is how an operator ends up debugging the wrong box.
@@ -235,6 +290,9 @@ func restartOnlyChanges(old, next *config.Config) []string {
 	add("device_local_addr", old.DeviceLocalAddr, next.DeviceLocalAddr)
 	add("log_level", old.LogLevel, next.LogLevel)
 	add("metrics.addr", old.Metrics.Addr, next.Metrics.Addr)
+	if !reflect.DeepEqual(old.SC, next.SC) {
+		out = append(out, "sc.* changed (vmac, uuid, hubs or TLS); restart required")
+	}
 	if old.RequestTimeoutSecs != next.RequestTimeoutSecs {
 		out = append(out, "request_timeout_secs changed; restart required")
 	}
@@ -318,6 +376,13 @@ func configChecks(cfg *config.Config) []check {
 	if cfg.DeviceInstance != nil {
 		out = append(out, check{Name: "device-instance", OK: true,
 			Detail: fmt.Sprintf("pinned to device,%d", *cfg.DeviceInstance)})
+	}
+	if cfg.SC.Enabled() {
+		scDetail := fmt.Sprintf("vmac %s -> %s", cfg.SC.VMAC, strings.Join(cfg.SC.Hubs, ", "))
+		if len(cfg.Access.SCAllow) > 0 {
+			scDetail += fmt.Sprintf(" (allowlist(%d))", len(cfg.Access.SCAllow))
+		}
+		out = append(out, check{Name: "bacnet-sc", OK: true, Detail: scDetail})
 	}
 	return out
 }
@@ -407,12 +472,15 @@ Usage (flags, no config file — plug and play):
       [--write-deny <spec>]... [--request-timeout <secs>] \
       [--max-pending <n>] [--device-instance <n>] \
       [--device-local <ip:port>] [--metrics-addr <addr>] \
-      [--log-level <lvl>]
+      [--log-level <lvl>] \
+      [--sc-vmac <vmac> --sc-uuid <uuid> --sc-hub <wss://url>... \
+       [--sc-ca <pem>] [--sc-cert <pem>] [--sc-key <pem>] \
+       [--sc-allow <vmac>]...]
 
-The gateway sits between a building's BACnet/IP clients and ONE legacy
-device:
+The gateway sits between a building's clients and ONE legacy device:
 
   [N clients] --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [legacy device]
+  [N SC nodes] --BACnet/SC--> [hub] --> [bacnet-shield] --BACnet/IP--> ...
 
 It rewrites only the network layer and the APDU invoke ID; the service
 payload is forwarded byte for byte, so vendor quirks survive. Client-leg
@@ -433,9 +501,17 @@ Write policy (object-scoped, instead of all-or-nothing --read-only):
   WritePropertyMultiple can never straddle an allowed rule. An undecodable
   or segmented write is denied. Mutually exclusive with --read-only.
 
-Reload: send SIGHUP to re-read --config and swap the access policy in
-place. Listener, device address, timeouts and log level need a restart and
-are reported as warnings.
+BACnet/SC front leg: the proxy attaches to an existing hub as a node, never
+as a hub. A client is identified by its VMAC, so SC nodes share the same
+pending table, replay cache, COV routing and write policy as IP clients and
+are independent of each other. --sc-allow opts into a VMAC allow-list; with
+none configured every node the hub delivers is accepted and only the write
+policy gates it. --sc-ca replaces the system roots; --sc-cert/--sc-key present
+a client certificate. The clear device leg stays plain BACnet/IP.
+
+Reload: send SIGHUP to re-read --config and swap the access policy (including
+sc_allow) in place. Listener, device address, timeouts, log level and the SC
+identity/hub/TLS block need a restart and are reported as warnings.
 
 Other commands:
   bacnet-shield validate [--config <file> | same flags as gateway] [--json]

@@ -30,22 +30,36 @@ BVLC-SC (`0x82`), hub/route handling. This is the reason the project does not
 grow a private PSK tunnel: the secure leg should be a standard boundary that
 other BACnet stacks can join.
 
-Done: BVLL-SC codec (`internal/bacnet/sc`), golden-byte cross-checked against
-bacpypes3 and bacnet-stack, with a fuzz target.
+Done:
 
-Shape decisions: the proxy is an SC **node** attaching to an existing hub
-(primary + failover), not a hub; client admission is an opt-in VMAC/UUID
-allow-list (default accepts whatever the hub delivers, gated only by the write
-policy); the independent SC peer is bacnet-stack's `sc-hub` via Docker.
+- BVLL-SC codec (`internal/bacnet/sc`), golden-byte cross-checked against
+  bacpypes3 and bacnet-stack, with a fuzz target.
+- Transport (`internal/scnet`): TLS 1.3, a fuzzed RFC 6455 WebSocket parser,
+  and the node state machine (Connect handshake, heartbeat, reconnect/failover
+  across a hub list). The node drops a frame addressed to another VMAC and one
+  with no origin.
+- Front-leg abstraction (`internal/proxy`): a `peer` keyed by `ip:port` or
+  `sc:<vmac>`, NPDU-based replay cache, and SC clients reusing the pending
+  table, COV routing and write policy. Multi-client by construction.
+- Configuration: `sc:` YAML block, flags, CA/client-certificate files, and the
+  reloadable `access.sc_allow` VMAC allow-list (empty = accept what the hub
+  delivers). Tests cover two SC clients with the same invoke ID, per-VMAC ACL
+  and rate, denial shape, COV and I-Am fan-out.
 
-Remaining: WebSocket transport over TLS 1.3, the connect/heartbeat/reconnect
-state machine, the front-leg abstraction that lets SC clients reuse the
-existing pending/replay/write-policy machinery, and the interop scenario.
+Remaining:
 
-Work includes certificate/CA configuration, SC hub connection state,
-address-to-client mapping (SC nodes are not identified by IP:port), and an
-interop scenario against an independent SC implementation. The clear device
-leg stays plain BACnet/IP.
+- An independent-peer interop run: bacnet-stack's `sc-hub` via Docker, plus an
+  SC client that drives a read, a denied write and a COV subscription through
+  the proxy. Until that runs, the SC leg is pinned by the in-process TLS hub
+  and data-plane tests, not a third-party implementation.
+- SC connection-state observability (a connected/hub-status gauge) if an
+  appliance dashboard needs it; today a hub outage is visible only in the log.
+- UUID-keyed admission. The BVLL-SC data path carries the sender's VMAC but
+  not its UUID; a UUID rule needs Address-Resolution and a bounded VMAC→UUID
+  cache. `access.sc_allow` currently accepts VMAC entries only and rejects a
+  UUID entry rather than pretending to enforce it.
+
+The clear device leg stays plain BACnet/IP.
 
 ### B2 — Multi-device instance
 

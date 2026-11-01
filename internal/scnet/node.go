@@ -427,6 +427,19 @@ func (n *Node) heartbeat(conn *wsConn) bool {
 func (n *Node) handleFrame(conn *wsConn, hdr sc.Header) error {
 	switch hdr.Function {
 	case sc.FuncEncapsulatedNPDU:
+		// The hub is trusted to route, but not to the point of handing the
+		// application a frame addressed elsewhere or with no sender: a frame
+		// for another VMAC is not this node's traffic, and a frame with no
+		// origin cannot be attributed, gated or answered.
+		if hdr.Orig == nil || hdr.Orig.IsZero() {
+			n.log.Debug("sc: encapsulated npdu without an origin vmac")
+			return nil
+		}
+		if hdr.Dest != nil && *hdr.Dest != n.cfg.VMAC && !hdr.Dest.IsBroadcast() {
+			n.log.Debug("sc: encapsulated npdu addressed to another node",
+				zap.String("dest", hdr.Dest.String()), zap.String("vmac", n.cfg.VMAC.String()))
+			return nil
+		}
 		if n.onNPDU != nil {
 			n.onNPDU(hdr.Orig, hdr.Payload)
 		}

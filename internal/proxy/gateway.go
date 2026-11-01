@@ -106,6 +106,7 @@ type Gateway struct {
 	deviceConn *net.UDPConn
 	deviceAddr *net.UDPAddr
 	deviceIP   net.IP
+	scLeg      SCLeg
 
 	mu         sync.Mutex
 	pending    map[byte]*pendingReq     // device invoke ID -> client request
@@ -318,33 +319,41 @@ func (g *Gateway) sendDevice(frame []byte) {
 	}
 }
 
-func (g *Gateway) sendClient(frame []byte, client *net.UDPAddr) {
-	if _, err := g.clientConn.WriteToUDP(frame, client); err != nil {
+func (g *Gateway) sendClientNPDU(npdu []byte, client peer) {
+	if err := client.SendNPDU(npdu); err != nil {
 		g.log.Debug("client leg write", zap.Error(err), zap.Stringer("client", client))
 	}
 }
 
-// buildFrame wraps an NPDU as a plain Original-Unicast BACnet/IP frame. The
-// proxy always speaks unicast to the device and to each client, even when the
+// buildNPDU returns the network-layer bytes the proxy forwards: routing fields
+// stripped, the APDU as given. The client leg wraps this in whatever link
+// layer it speaks (BVLC for BACnet/IP, BVLL-SC for BACnet/SC), which is why the
+// data plane and its replay cache hold NPDUs rather than link frames.
+func buildNPDU(n bacnet.NPDU, apdu []byte) []byte {
+	n = n.StripRouting()
+	n.APDU = apdu
+	return n.Marshal()
+}
+
+// buildFrame wraps an NPDU as a plain Original-Unicast BACnet/IP frame for the
+// clear device leg. The proxy always speaks unicast to the device, even when a
 // client sent a broadcast: the proxy has exactly one device, so a broadcast is
 // a discovery request aimed at that device.
 func buildFrame(n bacnet.NPDU, apdu []byte) []byte {
-	n = n.StripRouting()
-	n.APDU = apdu
-	return bacnet.BVLC{Function: bacnet.BVLCOriginalUnicastNPDU, Data: n.Marshal()}.Marshal()
+	return bacnet.BVLC{Function: bacnet.BVLCOriginalUnicastNPDU, Data: buildNPDU(n, apdu)}.Marshal()
 }
 
 // touchClient records a client for unsolicited notification delivery. It is
 // called only after the ACL and rate checks, so an off-list source never enters
 // the table. At the cap the oldest entry is evicted: a new legitimate client is
 // more valuable than a stale one.
-func (g *Gateway) touchClient(src *net.UDPAddr, now time.Time) {
-	key := src.String()
+func (g *Gateway) touchClient(p peer, now time.Time) {
+	key := p.Key()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if c, ok := g.clients[key]; ok {
 		c.last = now
-		c.addr = src
+		c.peer = p
 		return
 	}
 	if len(g.clients) >= maxClients {
@@ -357,26 +366,26 @@ func (g *Gateway) touchClient(src *net.UDPAddr, now time.Time) {
 		}
 		delete(g.clients, oldestKey)
 	}
-	g.clients[key] = &clientState{addr: src, last: now}
+	g.clients[key] = &clientState{peer: p, last: now}
 }
 
 // activeClients snapshots the clients that should receive a broadcast-shaped
 // notification. The slice is a copy; the caller may send to it without the
 // lock.
-func (g *Gateway) activeClients() []*net.UDPAddr {
+func (g *Gateway) activeClients() []peer {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := time.Now()
-	out := make([]*net.UDPAddr, 0, len(g.clients))
+	out := make([]peer, 0, len(g.clients))
 	for _, c := range g.clients {
 		if now.Sub(c.last) <= clientIdle {
-			out = append(out, c.addr)
+			out = append(out, c.peer)
 		}
 	}
 	return out
 }
 
 type clientState struct {
-	addr *net.UDPAddr
+	peer peer
 	last time.Time
 }

@@ -94,7 +94,7 @@ func (g *Gateway) handleDeviceResponse(a bacnet.APDU, n bacnet.NPDU, src *net.UD
 		g.log.Debug("device response patch", zap.Error(err), zap.Stringer("device", src))
 		return
 	}
-	frame := buildFrame(n, apdu)
+	npdu := buildNPDU(n, apdu)
 
 	complete := true
 	switch {
@@ -116,18 +116,18 @@ func (g *Gateway) handleDeviceResponse(a bacnet.APDU, n bacnet.NPDU, src *net.UD
 	}
 	if complete {
 		g.applyCOVLocked(p, a)
-		key := clientKey{p.client.String(), p.clientID}
+		key := clientKey{p.client.Key(), p.clientID}
 		hash := p.hash
 		g.dropPendingLocked(a.InvokeID)
 		if !a.Segmented {
-			g.cacheLocked(key, hash, frame, now)
+			g.cacheLocked(key, hash, npdu, now)
 		}
 	}
 	client := p.client
 	g.mu.Unlock()
 
 	g.metrics.Responses.Inc()
-	g.sendClient(frame, client)
+	g.sendClientNPDU(npdu, client)
 }
 
 // applyCOVLocked installs or removes a subscription when the device accepts the
@@ -138,7 +138,7 @@ func (g *Gateway) applyCOVLocked(p *pendingReq, a bacnet.APDU) {
 	}
 	if !p.cov.hasLifetime {
 		// A SubscribeCOV with no lifetime is a cancellation.
-		g.removeSubLocked(p.cov.object, p.cov.procID, p.client.String())
+		g.removeSubLocked(p.cov.object, p.cov.procID, p.client.Key())
 		return
 	}
 	var expires time.Time
@@ -166,7 +166,7 @@ func (g *Gateway) handleDeviceRequest(a bacnet.APDU, n bacnet.NPDU, src *net.UDP
 			g.mu.Unlock()
 			g.metrics.Replayed.Inc()
 			for _, t := range targets {
-				g.sendClient(t.frame, t.client)
+				g.sendClientNPDU(t.npdu, t.client)
 			}
 			return
 		case a.Segmented && ex.segmented && ex.service == a.Service:
@@ -176,14 +176,14 @@ func (g *Gateway) handleDeviceRequest(a bacnet.APDU, n bacnet.NPDU, src *net.UDP
 				if err := bacnet.PatchInvokeID(apdu, t.clientID); err != nil {
 					continue
 				}
-				t.frame = buildFrame(n, apdu)
+				t.npdu = buildNPDU(n, apdu)
 			}
 			ex.deadline = now.Add(g.cfg.RequestTimeout)
 			targets := make([]*clientForward, len(ex.targets))
 			copy(targets, ex.targets)
 			g.mu.Unlock()
 			for _, t := range targets {
-				g.sendClient(t.frame, t.client)
+				g.sendClientNPDU(t.npdu, t.client)
 			}
 			return
 		default:
@@ -191,7 +191,7 @@ func (g *Gateway) handleDeviceRequest(a bacnet.APDU, n bacnet.NPDU, src *net.UDP
 		}
 	}
 
-	var targets []*net.UDPAddr
+	var targets []peer
 	if obj, ok := bacnet.COVNotificationObject(a); ok {
 		procID, _ := bacnet.COVNotificationProcessID(a)
 		targets = g.subscribersLocked(obj, procID)
@@ -216,7 +216,7 @@ func (g *Gateway) handleDeviceRequest(a bacnet.APDU, n bacnet.NPDU, src *net.UDP
 		deadline:  now.Add(g.cfg.RequestTimeout),
 	}
 	for _, client := range targets {
-		cid, ok := g.allocClientID(client.String())
+		cid, ok := g.allocClientID(client.Key())
 		if !ok {
 			g.log.Warn("no free client invoke id for a device request",
 				zap.Stringer("client", client))
@@ -229,9 +229,9 @@ func (g *Gateway) handleDeviceRequest(a bacnet.APDU, n bacnet.NPDU, src *net.UDP
 		ex.targets = append(ex.targets, &clientForward{
 			client:   client,
 			clientID: cid,
-			frame:    buildFrame(n, apdu),
+			npdu:     buildNPDU(n, apdu),
 		})
-		g.toDevice[clientKey{client.String(), cid}] = a.InvokeID
+		g.toDevice[clientKey{client.Key(), cid}] = a.InvokeID
 	}
 	if len(ex.targets) == 0 {
 		g.mu.Unlock()
@@ -247,7 +247,7 @@ func (g *Gateway) handleDeviceRequest(a bacnet.APDU, n bacnet.NPDU, src *net.UDP
 	g.mu.Unlock()
 
 	for _, t := range frames {
-		g.sendClient(t.frame, t.client)
+		g.sendClientNPDU(t.npdu, t.client)
 	}
 }
 
@@ -279,9 +279,9 @@ func (g *Gateway) handleDeviceUnconfirmed(a bacnet.APDU, n bacnet.NPDU) {
 			g.log.Debug("cov notification without a subscriber", zap.Stringer("object", obj))
 			return
 		}
-		frame := buildFrame(n, n.APDU)
+		npdu := buildNPDU(n, n.APDU)
 		for _, t := range targets {
-			g.sendClient(frame, t)
+			g.sendClientNPDU(npdu, t)
 		}
 	default:
 		g.relayToActive(n)
@@ -294,9 +294,9 @@ func (g *Gateway) relayToActive(n bacnet.NPDU) {
 		g.metrics.NotificationsDropped.Inc()
 		return
 	}
-	frame := buildFrame(n, n.APDU)
+	npdu := buildNPDU(n, n.APDU)
 	for _, t := range targets {
-		g.sendClient(frame, t)
+		g.sendClientNPDU(npdu, t)
 	}
 }
 
@@ -344,16 +344,16 @@ func (g *Gateway) dropExchangeLocked(devID byte) {
 	}
 	delete(g.fromDevice, devID)
 	for _, t := range ex.targets {
-		delete(g.toDevice, clientKey{t.client.String(), t.clientID})
+		delete(g.toDevice, clientKey{t.client.Key(), t.clientID})
 	}
 }
 
 // activeClientsLocked is activeClients for a caller that already holds mu.
-func (g *Gateway) activeClientsLocked(now time.Time) []*net.UDPAddr {
-	out := make([]*net.UDPAddr, 0, len(g.clients))
+func (g *Gateway) activeClientsLocked(now time.Time) []peer {
+	out := make([]peer, 0, len(g.clients))
 	for _, c := range g.clients {
 		if now.Sub(c.last) <= clientIdle {
-			out = append(out, c.addr)
+			out = append(out, c.peer)
 		}
 	}
 	return out
