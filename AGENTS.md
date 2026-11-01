@@ -40,7 +40,8 @@ rewritten, and only the front-leg policy can reject a request.
 | COV | Track `SubscribeCOV` and `SubscribeCOVProperty` (one monitored object each). Install only after a SimpleACK. `SubscribeCOVPropertyMultiple` is refused |
 | Config changes | `SIGHUP` re-reads `--config` and swaps only the access policy. Listener/device/timeout/log/metrics changes are reported as restart-only warnings. Invalid reload keeps the running policy |
 | Secure front leg | BACnet/SC (TLS 1.3 + WebSocket, BVLC-SC `0x82`). The proxy is an SC **node** that attaches to an existing hub (primary + failover), not a hub itself. A private PSK tunnel is explicitly rejected |
-| SC client admission | Opt-in SC allow-list keyed by VMAC/UUID. With none configured, any node the hub delivers is accepted and only the write policy gates it (same "protection is opt-in" shape as the IP leg) |
+| SC client admission | Opt-in SC allow-list keyed by VMAC/UUID. With none configured, any node the hub delivers is accepted and only the write policy gates it (same "protection is opt-in" shape as the IP leg). The SC leg is multi-client: state is keyed per sender VMAC, never per connection |
+| SC transport | TLS 1.3 (`crypto/tls`) + a small, fuzzed WebSocket frame parser we own, not a WebSocket dependency. The proxy is always the WebSocket client |
 | Ground truth | ASHRAE 135 wire formats, cross-checked against **bacpypes3 0.0.110** in `.venv`. Vendor divergence is reported in [CONFORMANCE.md](CONFORMANCE.md), never silently adapted away in the proxy |
 | No CI | Deliberate user decision across the Shield projects. Gates are local `make` targets |
 
@@ -50,6 +51,7 @@ rewritten, and only the front-leg policy can reject a request.
 cmd/bacnet-shield/     CLI: gateway | validate | selftest | version | help
 internal/bacnet/       Wire codecs (BVLC, NPDU, APDU, tags, object IDs, services)
 internal/bacnet/sc/    BACnet/SC virtual link layer (BVLL-SC) codec
+internal/scnet/        SC transport: TLS 1.3, WebSocket framing, node↔hub state machine
 internal/access/       Allow-list, token bucket, write policy
 internal/config/       YAML + flags, validation, access-policy compilation
 internal/proxy/        Data plane: routing, invoke IDs, COV, firmware probe
@@ -178,6 +180,11 @@ Done in v1:
   message bodies, golden-byte cross-checked against bacpypes3, own fuzz target.
   The transport (TLS 1.3 + WebSocket) and the connect/heartbeat state machine
   are the next step; see [BACKLOG.md](BACKLOG.md) B1.
+- SC transport (`internal/scnet`): TLS 1.3 + a fuzzed RFC 6455 frame parser,
+  and a node state machine (connect handshake, heartbeats, reconnect/failover)
+  tested against a real in-process TLS hub. Multi-client by construction.
+  Remaining B1 work is wiring the SC leg into the proxy data plane and an
+  independent-peer interop run.
 - bacpypes3 interop: read, Who-Is, denied write, SIGHUP reload to an allowed
   write, uncovered write still denied, read-back of the written value.
 
