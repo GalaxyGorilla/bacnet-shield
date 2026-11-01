@@ -8,6 +8,7 @@ import (
 
 	"github.com/GalaxyGorilla/bacnet-shield/internal/access"
 	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/observ"
 )
 
 // handleClient is the BACnet/IP front-leg entry point for one datagram. It
@@ -24,14 +25,17 @@ func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
 	switch pol.Check(src.IP, now) {
 	case access.DenyACL:
 		g.metrics.ACLDenied.Inc()
+		g.audit.Record(observ.AuditEvent{Event: "acl_denied", Leg: "ip", Client: src.String()})
 		g.log.Debug("client denied by acl", zap.Stringer("client", src))
 		return
 	case access.DenyRate:
 		g.metrics.RateLimited.Inc()
+		g.audit.Record(observ.AuditEvent{Event: "rate_limited", Leg: "ip", Client: src.String(), Reason: "per_client_rate"})
 		g.log.Debug("client denied by rate limit", zap.Stringer("client", src))
 		return
 	case access.DenyDevice:
 		g.metrics.DeviceRateLimited.Inc()
+		g.audit.Record(observ.AuditEvent{Event: "device_budget_denied", Leg: "ip", Client: src.String(), Reason: "device_budget"})
 		g.log.Debug("client denied by the shared device budget", zap.Stringer("client", src))
 		return
 	}
@@ -112,17 +116,28 @@ func (g *Gateway) handleClientConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, no
 	if a.Service == bacnet.ServiceSubscribeCOVPropertyMultiple ||
 		(a.Segmented && (a.Service == bacnet.ServiceSubscribeCOV || a.Service == bacnet.ServiceSubscribeCOVProperty)) {
 		g.metrics.Unsupported.Inc()
+		g.audit.Record(observ.AuditEvent{
+			Event: "unsupported_subscription", Leg: peerLeg(p), Client: p.String(),
+			Service: a.ServiceName(), Reason: "unsupported_subscription",
+		})
 		g.log.Info("unsupported subscription request",
-			zap.Stringer("client", p), zap.Uint8("service", uint8(a.Service)))
+			zap.Stringer("client", p), zap.String("service", a.ServiceName()))
 		g.sendClientError(p, a, bacnet.ErrorClassServices, bacnet.ErrorCodeServiceRequestDenied)
 		return
 	}
 
-	if !pol.AllowWrite(a) {
+	if allowed, reason := pol.WriteVerdict(a); !allowed {
 		g.metrics.WritesDenied.Inc()
+		targets := writeTargetStrings(a)
+		g.audit.Record(observ.AuditEvent{
+			Event: "write_denied", Leg: peerLeg(p), Client: p.String(),
+			Service: a.ServiceName(), Targets: targets, Reason: reason,
+		})
 		g.log.Info("write denied by policy",
 			zap.Stringer("client", p),
-			zap.Uint8("service", uint8(a.Service)),
+			zap.String("service", a.ServiceName()),
+			zap.Strings("targets", targets),
+			zap.String("reason", reason),
 			zap.Uint8("invoke_id", a.InvokeID))
 		g.sendClientError(p, a, bacnet.ErrorClassSecurity, bacnet.ErrorCodeWriteAccessDenied)
 		return
@@ -261,10 +276,18 @@ func (g *Gateway) forwardConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, now tim
 // WriteGroup, TimeSynchronization, ...). Unconfirmed writes still change the
 // device, so the policy gates them before anything leaves the box.
 func (g *Gateway) handleClientUnconfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, pol *access.Policy) {
-	if !pol.AllowWrite(a) {
+	if allowed, reason := pol.WriteVerdict(a); !allowed {
 		g.metrics.WritesDenied.Inc()
+		targets := writeTargetStrings(a)
+		g.audit.Record(observ.AuditEvent{
+			Event: "write_denied", Leg: peerLeg(p), Client: p.String(),
+			Service: a.ServiceName(), Targets: targets, Reason: reason,
+		})
 		g.log.Info("unconfirmed write denied by policy",
-			zap.Stringer("client", p), zap.Uint8("service", uint8(a.Service)))
+			zap.Stringer("client", p),
+			zap.String("service", a.ServiceName()),
+			zap.Strings("targets", targets),
+			zap.String("reason", reason))
 		return
 	}
 	frame := buildFrame(n, n.APDU)

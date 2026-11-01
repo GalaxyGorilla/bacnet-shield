@@ -35,6 +35,8 @@ type Options struct {
 	SCKeyFile  string
 
 	MetricsAddr string
+	AuditFile   string
+	AuditMaxMB  int
 	LogLevel    string
 }
 
@@ -66,6 +68,8 @@ func Register(fs *pflag.FlagSet) *Options {
 	fs.StringVar(&o.SCKeyFile, "sc-key", "", "PEM client private key for the SC leg")
 
 	fs.StringVar(&o.MetricsAddr, "metrics-addr", "", "Prometheus listener address (empty = off)")
+	fs.StringVar(&o.AuditFile, "audit-file", "", "structured audit sink, JSON lines (empty = off)")
+	fs.IntVar(&o.AuditMaxMB, "audit-max-mb", 64, "rotate the audit file at this size, keeping one backup")
 	fs.StringVar(&o.LogLevel, "log-level", "info", "debug|info|warn|error")
 	return o
 }
@@ -80,6 +84,7 @@ func (o *Options) Build() (*Config, error) {
 	c.MaxPending = o.MaxPending
 	c.LogLevel = o.LogLevel
 	c.Metrics.Addr = o.MetricsAddr
+	c.Audit = Audit{File: o.AuditFile, MaxMB: o.AuditMaxMB}
 	if o.DeviceInstance >= 0 {
 		v := uint32(o.DeviceInstance)
 		c.DeviceInstance = &v

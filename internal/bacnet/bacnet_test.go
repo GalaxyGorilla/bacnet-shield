@@ -807,3 +807,25 @@ func TestErrorAPDUEncoding(t *testing.T) {
 		t.Fatal("truncated error payload accepted")
 	}
 }
+
+func TestServiceName(t *testing.T) {
+	cases := []struct {
+		a    APDU
+		want string
+	}{
+		{APDU{Type: PDUConfirmedRequest, HasService: true, Service: ServiceWriteProperty}, "write-property"},
+		{APDU{Type: PDUConfirmedRequest, HasService: true, Service: ServiceSubscribeCOVPropertyMultiple}, "subscribe-cov-property-multiple"},
+		{APDU{Type: PDUUnconfirmedRequest, HasService: true, Service: ServiceWhoIs}, "who-is"},
+		// The confirmed and unconfirmed numeric spaces overlap: value 5 is
+		// subscribe-cov when confirmed and unconfirmed-text-message otherwise.
+		{APDU{Type: PDUConfirmedRequest, HasService: true, Service: 5}, "subscribe-cov"},
+		{APDU{Type: PDUUnconfirmedRequest, HasService: true, Service: 5}, "unconfirmed-text-message"},
+		{APDU{Type: PDUConfirmedRequest, HasService: true, Service: 99}, "service-99"},
+		{APDU{Type: PDUConfirmedRequest, HasService: false}, ""},
+	}
+	for _, c := range cases {
+		if got := c.a.ServiceName(); got != c.want {
+			t.Fatalf("ServiceName(%+v) = %q, want %q", c.a, got, c.want)
+		}
+	}
+}

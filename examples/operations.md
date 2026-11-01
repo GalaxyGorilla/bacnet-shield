@@ -48,9 +48,10 @@ template; copy it and edit:
 
 - **Restart-only**: `listen_addr`, `device_addr`, `device_local_addr`,
   `device_instance`, `request_timeout_secs`, `max_pending`, `log_level`,
-  `metrics.addr`, and the whole `sc` block.
+  `metrics.addr`, `audit.*`, and the whole `sc` block.
 - **Reloadable on `SIGHUP`**: `access.allow`, `access.sc_allow`,
-  `access.rate_per_sec`, `access.read_only`, `access.write_policy`.
+  `access.rate_per_sec`, `access.device_rate_per_sec`, `access.read_only`,
+  `access.write_policy`.
 
 Keep the config readable only by the service user if it names internal addresses
 or an `sc` client key. An `sc` client private key (`key_file`) should be `0600`
@@ -96,9 +97,33 @@ trusted. The instruments that matter operationally:
 | Retransmissions | `bacnet_shield_replayed_total`, `bacnet_shield_retransmits_dropped_total` | a rising dropped count (lossy path or a client retrying during a slow device) |
 | COV | `bacnet_shield_cov_subscriptions`, `bacnet_shield_notifications_dropped_total` | notifications with no subscriber (a client that stopped without cancelling) |
 | SC link | `bacnet_shield_sc_connected`, `bacnet_shield_sc_reconnects_total` | `sc_connected` at 0 during an outage; reconnects climbing |
+| Audit | `bacnet_shield_audit_dropped_total` | any non-zero value means the audit queue overflowed — raise the sink's throughput or investigate a flood |
 
 Logs are console-formatted for journald. `log_level: info` records attach/detach,
 denials and reloads; `debug` adds per-datagram routing and parse detail.
+
+## Audit trail
+
+Counters tell you *how many* writes were refused; the audit tells you *which*.
+Set `audit.file` to append one JSON object per security decision, with the
+decoded object/property target of a refused write:
+
+```yaml
+audit:
+  file: "/var/log/bacnet-shield/audit.jsonl"
+  max_mb: 64                                 # rotate, keeping one backup
+```
+
+```bash
+tail -f /var/log/bacnet-shield/audit.jsonl | jq -c 'select(.event=="write_denied")'
+```
+
+Turning it on does not change the data plane: the audit observes decisions the
+policy already made. It is bounded two ways — the file rotates at `max_mb`
+keeping one backup, and the in-memory queue drops (and counts) records under a
+flood rather than blocking the reader. Watch `bacnet_shield_audit_dropped_total`
+if you run it during a flood. The file is created `0600`: it names who wrote
+what.
 
 ## Reload the policy in place
 

@@ -314,6 +314,56 @@ func TestWritePolicyUndecodableWriteDenied(t *testing.T) {
 	}
 }
 
+func TestWritePolicyDecideReasons(t *testing.T) {
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 5}
+	segmented := writeProperty(t, oid, bacnet.PropertyPresentValue)
+	segmented.Segmented = true
+	undecodable := bacnet.APDU{Type: bacnet.PDUConfirmedRequest, HasService: true,
+		Service: bacnet.ServiceWriteProperty, Payload: []byte{0x0C, 0x00}}
+	reinit := bacnet.APDU{Type: bacnet.PDUConfirmedRequest, HasService: true, Service: bacnet.ServiceReinitializeDevice}
+
+	cases := []struct {
+		name   string
+		policy *WritePolicy
+		apdu   bacnet.APDU
+		reason string
+	}{
+		{"read_only", mustWritePolicy(t, true, "", nil),
+			writeProperty(t, oid, bacnet.PropertyPresentValue), "read_only"},
+		{"segmented", mustWritePolicy(t, false, ActionAllow, nil), segmented, "segmented_write"},
+		{"undecodable", mustWritePolicy(t, false, ActionAllow, nil), undecodable, "undecodable_write"},
+		{"default_deny", mustWritePolicy(t, false, ActionDeny, nil),
+			writeProperty(t, oid, bacnet.PropertyPresentValue), "default_deny"},
+		{"deny_rule", mustWritePolicy(t, false, ActionAllow, []Rule{{Spec: "analog-value:5:*", Action: ActionDeny}}),
+			writeProperty(t, oid, bacnet.PropertyPresentValue), "deny_rule"},
+		{"service_level_denied", mustWritePolicy(t, false, ActionDeny, []Rule{{Spec: "*", Action: ActionAllow}}),
+			reinit, "service_level_denied"},
+	}
+	for _, c := range cases {
+		allowed, reason := c.policy.Decide(c.apdu)
+		if allowed {
+			t.Fatalf("%s: allowed, want denied", c.name)
+		}
+		if reason != c.reason {
+			t.Fatalf("%s: reason = %q, want %q", c.name, reason, c.reason)
+		}
+	}
+
+	// An allowed write carries no reason.
+	if allowed, reason := mustWritePolicy(t, false, ActionAllow, nil).Decide(writeProperty(t, oid, bacnet.PropertyPresentValue)); !allowed || reason != "" {
+		t.Fatalf("allowed write = %v/%q, want true/empty", allowed, reason)
+	}
+}
+
+func mustWritePolicy(t *testing.T, readOnly bool, def Action, rules []Rule) *WritePolicy {
+	t.Helper()
+	p, err := NewWritePolicy(readOnly, def, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func TestWritePolicyUnconfirmedWrites(t *testing.T) {
 	p, err := NewWritePolicy(false, ActionDeny, nil)
 	if err != nil {

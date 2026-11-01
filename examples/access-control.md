@@ -143,6 +143,13 @@ The error parameters are **application-tagged ENUMERATEDs**, the form a strict
 BACnet stack expects; a raw-octet payload would be dropped by the peer and turn
 a clean refusal into a timeout.
 
+Every one of these decisions is *counted* (see the metrics table in the
+[README](../README.md#metrics)). For *which* client tried to write *what*, turn
+on the [audit trail](operations.md#audit-trail): a refused write is recorded
+with its decoded object/property target and a stable reason
+(`read_only`, `deny_rule`, `default_deny`, `segmented_write`,
+`undecodable_write`, `service_level_denied`).
+
 ## Reload without downtime
 
 `SIGHUP` re-reads the config file and swaps **the access policy only** — the part
@@ -158,11 +165,12 @@ policy is read per datagram, so
 the swap takes effect on the next packet with no listener rebind and no dropped
 clients.
 
-Everything socket- or crypto-bound (`listen_addr`, `device_addr`,
-`device_instance`, timeouts, `max_pending`, `log_level`, `metrics.addr` and the
-whole `sc` block) is reported as a **restart-only warning** rather than silently
-ignored. An invalid file, or a policy that does not compile, keeps the running
-policy: a reload typo must never leave the device unprotected, or wide open.
+Everything socket-, file- or crypto-bound (`listen_addr`, `device_addr`,
+`device_local_addr`, `device_instance`, timeouts, `max_pending`, `log_level`,
+`metrics.addr`, `audit.*` and the whole `sc` block) is reported as a
+**restart-only warning** rather than silently ignored. An invalid file, or a
+policy that does not compile, keeps the running policy: a reload typo must never
+leave the device unprotected, or wide open.
 
 In flags mode there is no file to re-read, so a `SIGHUP` is ignored with a
 warning — the flags came from the command line.

@@ -1,6 +1,9 @@
 package bacnet
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
 
 // PDUType is the APDU type, the high nibble of the first octet.
 type PDUType byte
@@ -422,6 +425,78 @@ func (s Service) IsWrite() bool {
 		return true
 	}
 	return false
+}
+
+// confirmedServiceNames and unconfirmedServiceNames name the services for the
+// audit and log output. The two numeric spaces overlap, so the name is chosen
+// by the PDU type; an unnamed service falls back to "service-<n>".
+var confirmedServiceNames = map[Service]string{
+	ServiceAcknowledgeAlarm:                 "acknowledge-alarm",
+	ServiceConfirmedCOVNotification:         "confirmed-cov-notification",
+	ServiceConfirmedEventNotification:       "confirmed-event-notification",
+	ServiceGetAlarmSummary:                  "get-alarm-summary",
+	ServiceGetEnrollmentSummary:             "get-enrollment-summary",
+	ServiceSubscribeCOV:                     "subscribe-cov",
+	ServiceAtomicReadFile:                   "atomic-read-file",
+	ServiceAtomicWriteFile:                  "atomic-write-file",
+	ServiceAddListElement:                   "add-list-element",
+	ServiceRemoveListElement:                "remove-list-element",
+	ServiceCreateObject:                     "create-object",
+	ServiceDeleteObject:                     "delete-object",
+	ServiceReadProperty:                     "read-property",
+	ServiceReadPropertyConditional:          "read-property-conditional",
+	ServiceReadPropertyMultiple:             "read-property-multiple",
+	ServiceWriteProperty:                    "write-property",
+	ServiceWritePropertyMultiple:            "write-property-multiple",
+	ServiceDeviceCommunicationControl:       "device-communication-control",
+	ServiceConfirmedPrivateTransfer:         "confirmed-private-transfer",
+	ServiceConfirmedTextMessage:             "confirmed-text-message",
+	ServiceReinitializeDevice:               "reinitialize-device",
+	ServiceVTOpen:                           "vt-open",
+	ServiceVTClose:                          "vt-close",
+	ServiceVTData:                           "vt-data",
+	ServiceAuthenticate:                     "authenticate",
+	ServiceRequestKey:                       "request-key",
+	ServiceReadRange:                        "read-range",
+	ServiceLifeSafetyOperation:              "life-safety-operation",
+	ServiceSubscribeCOVProperty:             "subscribe-cov-property",
+	ServiceGetEventInformation:              "get-event-information",
+	ServiceSubscribeCOVPropertyMultiple:     "subscribe-cov-property-multiple",
+	ServiceConfirmedCOVNotificationMultiple: "confirmed-cov-notification-multiple",
+	ServiceConfirmedAuditNotification:       "confirmed-audit-notification",
+	ServiceAuditLogQuery:                    "audit-log-query",
+}
+
+var unconfirmedServiceNames = map[Service]string{
+	ServiceIAm:                          "i-am",
+	ServiceIHave:                        "i-have",
+	ServiceUnconfirmedCOVNotification:   "unconfirmed-cov-notification",
+	ServiceUnconfirmedEventNotification: "unconfirmed-event-notification",
+	ServiceUnconfirmedPrivateTransfer:   "unconfirmed-private-transfer",
+	ServiceUnconfirmedTextMessage:       "unconfirmed-text-message",
+	ServiceTimeSynchronization:          "time-synchronization",
+	ServiceWhoHas:                       "who-has",
+	ServiceWhoIs:                        "who-is",
+	ServiceUTCTimeSynchronization:       "utc-time-synchronization",
+	ServiceWriteGroup:                   "write-group",
+}
+
+// ServiceName names the service choice for logging and audit. It returns "" for
+// a PDU with no service choice, and "service-<n>" for a number it does not know.
+func (a APDU) ServiceName() string {
+	if !a.HasService {
+		return ""
+	}
+	var names map[Service]string
+	if a.Type == PDUUnconfirmedRequest {
+		names = unconfirmedServiceNames
+	} else {
+		names = confirmedServiceNames
+	}
+	if n, ok := names[a.Service]; ok {
+		return n
+	}
+	return "service-" + strconv.Itoa(int(a.Service))
 }
 
 // ErrorClass is the BACnet error-class octet.

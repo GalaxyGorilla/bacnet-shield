@@ -219,10 +219,18 @@ func (p *Policy) CheckSC(vmac sc.MAC, now time.Time) Decision {
 
 // AllowWrite decides a write APDU. Non-write APDUs always pass.
 func (p *Policy) AllowWrite(a bacnet.APDU) bool {
+	ok, _ := p.WriteVerdict(a)
+	return ok
+}
+
+// WriteVerdict decides a write APDU and returns the denial reason. It is the
+// audit-facing form of AllowWrite: the reason distinguishes a read-only policy
+// from a matching deny rule from an undecodable write, which a bare bool cannot.
+func (p *Policy) WriteVerdict(a bacnet.APDU) (bool, string) {
 	if p == nil || p.write == nil {
-		return true
+		return true, ""
 	}
-	return p.write.Allowed(a)
+	return p.write.Decide(a)
 }
 
 // Limit is a per-client token bucket table.

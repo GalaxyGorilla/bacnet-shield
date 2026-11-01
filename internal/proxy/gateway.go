@@ -62,6 +62,9 @@ type Config struct {
 	// DeviceInstance optionally pins the expected device instance. It never
 	// gates traffic; a mismatch is a warning (and a selftest failure).
 	DeviceInstance *uint32
+	// Audit, when non-nil, receives one structured record per security
+	// decision. A nil audit records nothing.
+	Audit *observ.Audit
 }
 
 const (
@@ -100,6 +103,7 @@ type Gateway struct {
 	cfg     Config
 	log     *zap.Logger
 	metrics *observ.Metrics
+	audit   *observ.Audit
 	policy  atomic.Pointer[access.Policy]
 
 	clientConn *net.UDPConn
@@ -171,6 +175,7 @@ func New(cfg Config, pol *access.Policy, log *zap.Logger, m *observ.Metrics) (*G
 		cfg:        cfg,
 		log:        log,
 		metrics:    m,
+		audit:      cfg.Audit,
 		clientConn: clientConn,
 		deviceConn: deviceConn,
 		deviceAddr: deviceAddr,

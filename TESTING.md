@@ -9,6 +9,7 @@ local `make` target.
 | Codecs | BVLC, NPDU, APDU, tags, object IDs and write targets; malformed, truncated, extended-tag and segmented vectors |
 | Fuzzing | Nine native targets: `FuzzParseBVLC`, `FuzzParseNPDU`, `FuzzParseAPDU`, `FuzzParseObjectID`, `FuzzWriteTargets`, `FuzzTagReader`, `FuzzParse` and `FuzzDecodeMessage` (BVLL-SC), and `FuzzParseFrame` (WebSocket) |
 | Policy | Allow-list, per-client rate limit, optional shared per-device budget, read-only, scoped write rules, deny-overrides, allow-must-cover, service-level writes; SC VMAC allow-list and per-VMAC bucket |
+| Audit | JSON-lines writer with time-stamping and omitted empty fields; rotation cap and one-backup bound; drop-and-count under a blocked sink; served end-to-end for a refused write (with decoded target and reason), an ACL denial on each leg, and an unsupported subscription; `ServiceName` for both service-number spaces |
 | Data plane | Real loopback UDP sockets, invoke-ID collision and reuse, retransmission dedupe, pending cap/expiry, routing strip, device source validation |
 | SC transport | Real in-process TLS 1.3 hub: connect handshake, heartbeat and heartbeat *timeout* (a hub that stops ACKing is dropped), reconnect and failover across a hub list, hostname verification, destination/origin filtering, attach/detach state reporting, and survival of a malformed frame and a non-binary WebSocket message |
 | SC data plane | In-memory SC leg: two clients with the same invoke ID, an IP and an SC client sharing an invoke ID, per-VMAC ACL/rate, per-leg rate isolation, write denial shape, COV routing, I-Am fan-out, replay served across the leg boundary, shared pending |
@@ -42,6 +43,10 @@ as failures.
 
 - A denied write never reaches the device; the client receives an Error PDU
   with class `security` and code `write-access-denied`.
+- A refused write is recorded in the opt-in audit stream with the client, the
+  service, the decoded object/property target and a closed-set reason; an ACL
+  denial on either leg and an unsupported subscription are recorded too; a full
+  audit queue drops-and-counts rather than blocking the data plane.
 - A denied write does not consume a device invoke ID.
 - A WritePropertyMultiple that mixes an allowed and a forbidden target is
   denied as a unit.
@@ -100,10 +105,12 @@ gateway, and drives:
 
 1. a read through the proxy (value checked);
 2. a Who-Is through the proxy (I-Am returned);
-3. a write refused by a read-only policy (Error 4/40);
+3. a write refused by a read-only policy (Error 4/40), which the on-disk audit
+   trail records with its decoded object/property target and the reason
+   `read_only`;
 4. a `SIGHUP` policy reload;
 5. the same write now allowed (ACK and read-back of the new value);
-6. an uncovered write still denied;
+6. an uncovered write still denied and audited as `default_deny`;
 7. a COV subscription that receives the initial notification and then the
    change from the client's own write, proving the device-originated
    notification is routed back to the subscriber;
@@ -127,9 +134,10 @@ builds bacnet-stack 1.6.1's hub (`bacschub`) and BSC clients (`bacwi`, `bacrp`,
 2. starts a bacpypes3 device on the clear leg;
 3. starts the bacnet-stack hub in Docker and the built gateway as a node of it;
 4. drives a Who-Is, a read, a device error (unknown object) relayed opaquely,
-   a denied write, a `SIGHUP` reload, an allowed write, an uncovered sibling
-   write and a read-back over BACnet/SC with a bacnet-stack client that is a
-   second node of the same hub;
+   a denied write (the audit trail records the SC leg, the target and the
+   reason), a `SIGHUP` reload, an allowed write, an uncovered sibling write and
+   a read-back over BACnet/SC with a bacnet-stack client that is a second node
+   of the same hub;
 5. restarts the hub container and checks the node re-attaches and keeps
    serving, scraping `/metrics` to confirm `bacnet_shield_sc_connected` is 1
    both before and after the restart and `bacnet_shield_sc_reconnects_total`

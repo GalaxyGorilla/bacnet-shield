@@ -28,6 +28,7 @@ fi
 tmp="$(mktemp -d)"
 dev_log="$tmp/device.log"
 gw_log="$tmp/gateway.log"
+audit="$tmp/audit.jsonl"
 cfg="$tmp/gateway.yaml"
 pids=""
 
@@ -80,6 +81,8 @@ listen_addr: "$PROXY_ADDR"
 device_addr: "$DEV_ADDR"
 device_instance: 1001
 log_level: info
+audit:
+  file: "$audit"
 access:
   read_only: true
 EOF
@@ -89,6 +92,8 @@ listen_addr: "$PROXY_ADDR"
 device_addr: "$DEV_ADDR"
 device_instance: 1001
 log_level: info
+audit:
+  file: "$audit"
 access:
   write_policy:
     default: deny
@@ -122,6 +127,11 @@ run_client whois || fail "who-is"
 echo "== write refused by the read-only policy"
 run_client write-denied analog-value,1 present-value || fail "write-denied"
 
+echo "== audit trail records the refused write, its target and its reason"
+wait_for "$audit" '"event":"write_denied"' 50 || fail "no write_denied audit record"
+grep -q '"reason":"read_only"' "$audit" || fail "audit reason was not read_only"
+grep -q 'analog-value,1:present-value' "$audit" || fail "audit did not record the write target"
+
 echo "== SIGHUP: allow analog-value:1:present-value in place"
 write_config policy
 gw_pid="$(echo "$pids" | awk '{print $NF}')"
@@ -133,6 +143,9 @@ run_client write analog-value,1 present-value || fail "allowed write"
 
 echo "== write still denied for uncovered analog-value,2 present-value"
 run_client write-denied analog-value,2 present-value || fail "uncovered write"
+
+echo "== audit trail records the uncovered write as a default_deny"
+wait_for "$audit" '"reason":"default_deny"' 50 || fail "audit did not record default_deny for the uncovered write"
 
 echo "== read back the written value"
 run_client read analog-value,1 present-value 2.5 || fail "read-back"

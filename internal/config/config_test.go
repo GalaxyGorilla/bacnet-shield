@@ -64,6 +64,9 @@ access:
         action: deny
 metrics:
   addr: 127.0.0.1:9090
+audit:
+  file: /var/log/bacnet-shield/audit.jsonl
+  max_mb: 32
 `)
 	if err != nil {
 		t.Fatal(err)
@@ -82,6 +85,9 @@ metrics:
 	}
 	if c.Metrics.Addr != "127.0.0.1:9090" {
 		t.Fatalf("metrics = %+v", c.Metrics)
+	}
+	if c.Audit.File != "/var/log/bacnet-shield/audit.jsonl" || c.Audit.MaxMB != 32 {
+		t.Fatalf("audit = %+v", c.Audit)
 	}
 }
 
@@ -165,6 +171,8 @@ func TestValidateRejections(t *testing.T) {
 		{"max pending over 256", "device_addr: 192.0.2.10:47808\nmax_pending: 257\n"},
 		{"bad log level", "device_addr: 192.0.2.10:47808\nlog_level: loud\n"},
 		{"bad metrics addr", "device_addr: 192.0.2.10:47808\nmetrics:\n  addr: nope\n"},
+		{"audit max_mb zero", "device_addr: 192.0.2.10:47808\naudit:\n  file: /tmp/a.log\n  max_mb: 0\n"},
+		{"audit max_mb huge", "device_addr: 192.0.2.10:47808\naudit:\n  max_mb: 20000\n"},
 		{"read only and write policy", "device_addr: 192.0.2.10:47808\naccess:\n  read_only: true\n  write_policy:\n    default: deny\n"},
 		{"write policy without default", "device_addr: 192.0.2.10:47808\naccess:\n  write_policy:\n    rules:\n      - {oid: \"*\", action: allow}\n"},
 		{"write policy bad default", "device_addr: 192.0.2.10:47808\naccess:\n  write_policy:\n    default: maybe\n"},
@@ -212,6 +220,8 @@ func TestFlagsBuild(t *testing.T) {
 		"--sc-ca", "/tmp/hub-ca.pem",
 		"--sc-allow", "02:00:00:00:00:0a",
 		"--metrics-addr", "127.0.0.1:9090",
+		"--audit-file", "/tmp/audit.jsonl",
+		"--audit-max-mb", "16",
 		"--log-level", "warn",
 	})
 	if err != nil {
@@ -240,6 +250,9 @@ func TestFlagsBuild(t *testing.T) {
 	}
 	if len(c.Access.SCAllow) != 1 {
 		t.Fatalf("sc_allow = %v", c.Access.SCAllow)
+	}
+	if c.Audit.File != "/tmp/audit.jsonl" || c.Audit.MaxMB != 16 {
+		t.Fatalf("audit = %+v", c.Audit)
 	}
 }
 

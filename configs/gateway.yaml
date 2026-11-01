@@ -7,10 +7,11 @@
 # Run:    bacnet-shield gateway --config /etc/bacnet-shield/gateway.yaml
 # Reload: kill -HUP <pid>   (swaps the access policy in place)
 #   Applies: access.allow, access.sc_allow, access.rate_per_sec,
-#            access.read_only, access.write_policy.
+#            access.device_rate_per_sec, access.read_only,
+#            access.write_policy.
 #   Needs a restart (logged as warnings): listen_addr, device_addr,
 #            device_local_addr, device_instance, request_timeout_secs,
-#            max_pending, log_level, metrics.addr and the sc block.
+#            max_pending, log_level, metrics.addr, audit.* and the sc block.
 # Or without a file (single device, flags only):
 #   bacnet-shield gateway --listen :47808 --device 10.0.0.42:47808 --read-only
 #
@@ -120,3 +121,15 @@ metrics:
   # unless the monitoring network is trusted: the scrape exposes counters
   # only, but the port is another listener on the box.
   addr: "127.0.0.1:9203"
+
+# Optional structured audit stream. Off unless a file is set. Every security
+# decision the front leg makes (ACL, per-client rate, shared device budget,
+# write policy, unsupported subscription) is appended as one JSON object per
+# line, with the decoded object/property target of a refused write. The file
+# rotates at max_mb, keeping one backup, so disk use is bounded; a full
+# in-memory queue drops records and counts them rather than stalling the data
+# plane. The file is created 0600.
+#
+# audit:
+#   file: "/var/log/bacnet-shield/audit.jsonl"
+#   max_mb: 64

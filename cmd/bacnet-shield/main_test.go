@@ -145,6 +145,8 @@ func TestLoadCheckedFlags(t *testing.T) {
 		"--allow", "127.0.0.0/8",
 		"--rate-per-sec", "10",
 		"--device-rate-per-sec", "40",
+		"--audit-file", "/tmp/audit.jsonl",
+		"--audit-max-mb", "8",
 		"--max-pending", "16",
 	}); err != nil {
 		t.Fatal(err)
@@ -155,6 +157,9 @@ func TestLoadCheckedFlags(t *testing.T) {
 	}
 	if cfg.MaxPending != 16 || cfg.Access.RatePerSec != 10 || cfg.Access.DeviceRatePerSec != 40 || len(cfg.Access.Allow) != 1 {
 		t.Fatalf("flags were not mapped: %+v", cfg)
+	}
+	if cfg.Audit.File != "/tmp/audit.jsonl" || cfg.Audit.MaxMB != 8 {
+		t.Fatalf("audit flags were not mapped: %+v", cfg.Audit)
 	}
 	pol, err := cfg.AccessPolicy()
 	if err != nil {

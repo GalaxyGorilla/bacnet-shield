@@ -60,6 +60,10 @@ still return plausible false process data.
   subscriber is answered with an Error PDU so the device stops retransmitting.
 - Atomic runtime-policy snapshots on `SIGHUP`; an invalid reload keeps the last
   valid policy.
+- An opt-in structured audit stream records every ACL, rate, device-budget,
+  write and unsupported-subscription decision with the client, the service and
+  the decoded object/property target, and a closed-set reason for a refused
+  write. It observes the decision the policy already made and never changes it.
 - Hardened systemd service, readiness ordering, watchdog, graceful shutdown,
   structured logs, a metrics endpoint and policy counters.
 

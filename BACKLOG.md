@@ -30,6 +30,14 @@ steps, not missing pieces of the documented single-device gateway.
   first, so a rate-denied request never spends the shared budget; both front
   legs charge the same budget. Denials are silent and counted as
   `bacnet_shield_device_rate_limited_total`. Reloadable.
+- Structured denial audit (B9): an opt-in (`audit.file`) JSON-lines stream with
+  one record per security decision (ACL, per-client rate, device budget, write
+  policy, unsupported subscription). A refused write carries its decoded
+  object/property target and a closed-set reason. Bounded by a rotating file
+  (one backup) and a non-blocking queue that drops-and-counts
+  (`bacnet_shield_audit_dropped_total`). Restart-only.
+- Service names (`bacnet.APDU.ServiceName`) for the two service-number spaces,
+  used by the audit and the human log.
 
 ## Open
 
@@ -128,10 +136,11 @@ See [README.md](README.md#security-controls) and
 
 ### B9 — Structured denial audit
 
-Denials are counted and logged, but there is no stable audit record of
-"client X tried to write object/property Y at time Z". Add a bounded,
-structured audit stream (or an opt-in file) without turning the proxy into a
-general logging system.
+DONE. Denials are counted, logged and now recorded as a bounded, opt-in JSON
+stream naming the client, the service and the decoded write target with a
+closed-set reason. See [README.md](README.md#audit-trail),
+[examples/operations.md](examples/operations.md#audit-trail) and
+`internal/observ/audit.go`.
 
 ### B10 — BACnet/IPv6
 

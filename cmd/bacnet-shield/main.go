@@ -119,6 +119,24 @@ func runGateway(args []string) int {
 			return 1
 		}
 	}
+
+	// The audit stream is opt-in. It is a bounded, non-blocking sink: a full
+	// queue drops records (and counts them) rather than stalling the data
+	// plane, so an on-list client cannot flood the disk through the log path.
+	var audit *observ.Audit
+	if cfg.Audit.File != "" {
+		audit, err = observ.NewAuditFile(cfg.Audit.File, int64(cfg.Audit.MaxMB)<<20, metrics.AuditDropped)
+		if err != nil {
+			if metricsLn != nil {
+				_ = metricsLn.Close()
+			}
+			log.Error("open audit file", zap.Error(err))
+			return 1
+		}
+		defer func() { _ = audit.Close() }()
+		log.Info("audit stream enabled", zap.String("file", cfg.Audit.File), zap.Int("max_mb", cfg.Audit.MaxMB))
+	}
+
 	g, err := proxy.New(proxy.Config{
 		ListenAddr:      cfg.ListenAddr,
 		DeviceAddr:      cfg.DeviceAddr,
@@ -126,6 +144,7 @@ func runGateway(args []string) int {
 		RequestTimeout:  time.Duration(cfg.RequestTimeoutSecs) * time.Second,
 		MaxPending:      cfg.MaxPending,
 		DeviceInstance:  cfg.DeviceInstance,
+		Audit:           audit,
 	}, pol, log, metrics)
 	if err != nil {
 		if metricsLn != nil {
@@ -305,6 +324,9 @@ func restartOnlyChanges(old, next *config.Config) []string {
 	add("device_local_addr", old.DeviceLocalAddr, next.DeviceLocalAddr)
 	add("log_level", old.LogLevel, next.LogLevel)
 	add("metrics.addr", old.Metrics.Addr, next.Metrics.Addr)
+	if !reflect.DeepEqual(old.Audit, next.Audit) {
+		out = append(out, "audit.* changed; restart required")
+	}
 	if !reflect.DeepEqual(old.SC, next.SC) {
 		out = append(out, "sc.* changed (vmac, uuid, hubs or TLS); restart required")
 	}
@@ -388,6 +410,10 @@ func configChecks(cfg *config.Config) []check {
 		detail += fmt.Sprintf(" (rate %.2f/s per client)", cfg.Access.RatePerSec)
 	}
 	out := []check{{Name: "config", OK: true, Detail: detail}}
+	if cfg.Audit.File != "" {
+		out = append(out, check{Name: "audit", OK: true,
+			Detail: fmt.Sprintf("%s (rotate at %d MiB)", cfg.Audit.File, cfg.Audit.MaxMB)})
+	}
 	if cfg.DeviceInstance != nil {
 		out = append(out, check{Name: "device-instance", OK: true,
 			Detail: fmt.Sprintf("pinned to device,%d", *cfg.DeviceInstance)})
@@ -488,6 +514,7 @@ Usage (flags, no config file — plug and play):
       [--write-deny <spec>]... [--request-timeout <secs>] \
       [--max-pending <n>] [--device-instance <n>] \
       [--device-local <ip:port>] [--metrics-addr <addr>] \
+      [--audit-file <path>] [--audit-max-mb <n>] \
       [--log-level <lvl>] \
       [--sc-vmac <vmac> --sc-uuid <uuid> --sc-hub <wss://url>... \
        [--sc-ca <pem>] [--sc-cert <pem>] [--sc-key <pem>] \
@@ -529,6 +556,14 @@ a client certificate. The clear device leg stays plain BACnet/IP.
 Reload: send SIGHUP to re-read --config and swap the access policy (including
 sc_allow) in place. Listener, device address, timeouts, log level and the SC
 identity/hub/TLS block need a restart and are reported as warnings.
+
+Audit: with --audit-file (or audit.file in YAML) every security decision the
+front leg makes (ACL, rate limit, device budget, write policy, unsupported
+subscription) is appended as one JSON object per line, with the decoded
+object/property target of a refused write. The file rotates at --audit-max-mb,
+keeping one backup, so it is bounded; a full in-memory queue drops records and
+counts them (bacnet_shield_audit_dropped_total) rather than stalling the data
+plane. The audit is off unless a file is configured.
 
 Other commands:
   bacnet-shield validate [--config <file> | same flags as gateway] [--json]

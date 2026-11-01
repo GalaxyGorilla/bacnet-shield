@@ -46,6 +46,7 @@ tmp="$(mktemp -d)"
 certdir="$tmp/certs"
 dev_log="$tmp/device.log"
 gw_log="$tmp/gateway.log"
+audit="$tmp/audit.jsonl"
 cfg="$tmp/gateway.yaml"
 pids=""
 
@@ -167,6 +168,8 @@ device_instance: 1001
 log_level: info
 metrics:
   addr: "$METRICS_ADDR"
+audit:
+  file: "$audit"
 access:
   read_only: true
 sc:
@@ -186,6 +189,8 @@ device_instance: 1001
 log_level: info
 metrics:
   addr: "$METRICS_ADDR"
+audit:
+  file: "$audit"
 access:
   write_policy:
     default: deny
@@ -231,6 +236,12 @@ echo "$err_out" | grep -q "unknown-object" || fail "device error not relayed (go
 echo "== write refused by the read-only policy"
 write_out="$(bsc bacwp 1001 analog-value 1 present-value 0 -1 4 3.5 || true)"
 echo "$write_out" | grep -q "write-access-denied" || fail "write denial not seen (got: $write_out)"
+
+echo "== audit trail records the SC denial with its leg, target and reason"
+wait_for "$audit" '"event":"write_denied"' 50 || fail "no write_denied audit record over SC"
+grep -q '"leg":"sc"' "$audit" || fail "audit did not label the SC leg"
+grep -q '"reason":"read_only"' "$audit" || fail "audit reason was not read_only"
+grep -q 'analog-value,1:present-value' "$audit" || fail "audit did not record the SC write target"
 
 echo "== SIGHUP: allow analog-value:1:present-value in place"
 write_config policy

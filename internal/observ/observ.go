@@ -55,6 +55,7 @@ type Metrics struct {
 	Replayed             prometheus.Counter
 	Retransmits          prometheus.Counter
 	NotificationsDropped prometheus.Counter
+	AuditDropped         prometheus.Counter
 
 	Pending       prometheus.Gauge
 	Subscriptions prometheus.Gauge
@@ -87,6 +88,7 @@ func NewMetrics() *Metrics {
 		Replayed:             f.NewCounter(prometheus.CounterOpts{Name: "bacnet_shield_replayed_total", Help: "Retransmissions answered from the finished-response cache."}),
 		Retransmits:          f.NewCounter(prometheus.CounterOpts{Name: "bacnet_shield_retransmits_dropped_total", Help: "Retransmissions dropped because the request is still in flight."}),
 		NotificationsDropped: f.NewCounter(prometheus.CounterOpts{Name: "bacnet_shield_notifications_dropped_total", Help: "Device notifications with no client to receive them."}),
+		AuditDropped:         f.NewCounter(prometheus.CounterOpts{Name: "bacnet_shield_audit_dropped_total", Help: "Audit records dropped because the audit queue was full."}),
 		Pending:              f.NewGauge(prometheus.GaugeOpts{Name: "bacnet_shield_pending", Help: "Requests currently in flight toward the device."}),
 		Subscriptions:        f.NewGauge(prometheus.GaugeOpts{Name: "bacnet_shield_cov_subscriptions", Help: "Active COV subscriptions routed by the proxy."}),
 		SCConnected:          f.NewGauge(prometheus.GaugeOpts{Name: "bacnet_shield_sc_connected", Help: "1 while the BACnet/SC leg is attached to a hub, 0 otherwise."}),

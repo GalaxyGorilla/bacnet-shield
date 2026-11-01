@@ -46,6 +46,7 @@ type Config struct {
 	Access   Access  `yaml:"access"`
 	SC       SC      `yaml:"sc"`
 	Metrics  Metrics `yaml:"metrics"`
+	Audit    Audit   `yaml:"audit"`
 }
 
 // Access is the front-leg policy block. The key names mirror the other
@@ -103,6 +104,19 @@ type Metrics struct {
 	Addr string `yaml:"addr"` // Prometheus HTTP listener; empty disables it
 }
 
+// Audit is the optional structured audit stream. An empty File disables it:
+// like every Shield control, the audit is opt-in. When enabled, one JSON
+// object per line is appended for every security decision the front leg makes
+// (allow-list, rate limit, device budget, write policy, unsupported
+// subscription).
+type Audit struct {
+	// File is the append-only sink. Empty = audit off.
+	File string `yaml:"file"`
+	// MaxMB rotates the file at this size, keeping one backup
+	// ("<file>.1"), so the disk use is bounded at about twice this. Default 64.
+	MaxMB int `yaml:"max_mb"`
+}
+
 // Defaults returns the values used for every field a config file or flag
 // does not set.
 func Defaults() *Config {
@@ -111,6 +125,7 @@ func Defaults() *Config {
 		RequestTimeoutSecs: 30,
 		MaxPending:         256,
 		LogLevel:           "info",
+		Audit:              Audit{MaxMB: 64},
 	}
 }
 
@@ -178,6 +193,9 @@ func (c *Config) Validate() error {
 		if err := validateHostPort("metrics.addr", c.Metrics.Addr); err != nil {
 			return err
 		}
+	}
+	if c.Audit.MaxMB < 1 || c.Audit.MaxMB > 10240 {
+		return fmt.Errorf("config: audit.max_mb %d outside 1..10240", c.Audit.MaxMB)
 	}
 	if err := c.validateSC(); err != nil {
 		return err

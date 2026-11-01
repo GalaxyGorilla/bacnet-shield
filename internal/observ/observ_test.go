@@ -90,6 +90,7 @@ func TestMetricsScrape(t *testing.T) {
 		"bacnet_shield_replayed_total",
 		"bacnet_shield_retransmits_dropped_total",
 		"bacnet_shield_notifications_dropped_total",
+		"bacnet_shield_audit_dropped_total",
 		"go_goroutines",
 	} {
 		if !strings.Contains(body, want) {

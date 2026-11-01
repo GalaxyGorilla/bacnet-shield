@@ -159,14 +159,29 @@ func (r rule) matches(t bacnet.WriteTarget) bool {
 
 // Allowed decides one APDU.
 func (p *WritePolicy) Allowed(a bacnet.APDU) bool {
+	allowed, _ := p.Decide(a)
+	return allowed
+}
+
+// Decide decides one APDU and, when it refuses, returns a stable reason string
+// for the audit record and the log. The reasons are a small, closed set so an
+// operator can alert on them:
+//
+//	read_only             an all-or-nothing read-only policy
+//	segmented_write       a segmented write, denied before decoding
+//	undecodable_write     a write whose target could not be decoded
+//	service_level_denied  a service-level write with no object target, default deny
+//	deny_rule             a matching deny rule
+//	default_deny          no allow matched and the default is deny
+func (p *WritePolicy) Decide(a bacnet.APDU) (allowed bool, reason string) {
 	if p == nil {
-		return true
+		return true, ""
 	}
 	if !a.IsWrite() {
-		return true
+		return true, ""
 	}
 	if p.readOnly {
-		return false
+		return false, "read_only"
 	}
 	// A segmented write is denied before decoding. The policy would only see
 	// the first segment, so a client could put an allowed target in segment
@@ -174,21 +189,24 @@ func (p *WritePolicy) Allowed(a bacnet.APDU) bool {
 	// inspect the second. Denying the whole class is fail-closed and costs
 	// only the rare large segmented write.
 	if a.Segmented {
-		return false
+		return false, "segmented_write"
 	}
 	targets, isWrite, err := bacnet.WriteTargets(a)
 	if !isWrite {
-		return true
+		return true, ""
 	}
 	if err != nil {
-		return false
+		return false, "undecodable_write"
 	}
 	if len(targets) == 0 {
 		// A service-level write (CreateObject, ReinitializeDevice, ...) has
 		// no object to match a rule against, so only the default can
 		// authorize it. This is why a default-deny policy also blocks those
 		// services even when object rules exist.
-		return p.defaultAllow
+		if p.defaultAllow {
+			return true, ""
+		}
+		return false, "service_level_denied"
 	}
 
 	for _, r := range p.rules {
@@ -197,7 +215,7 @@ func (p *WritePolicy) Allowed(a bacnet.APDU) bool {
 		}
 		for _, t := range targets {
 			if r.matches(t) {
-				return false
+				return false, "deny_rule"
 			}
 		}
 	}
@@ -213,8 +231,11 @@ func (p *WritePolicy) Allowed(a bacnet.APDU) bool {
 			}
 		}
 		if covered {
-			return true
+			return true, ""
 		}
 	}
-	return p.defaultAllow
+	if p.defaultAllow {
+		return true, ""
+	}
+	return false, "default_deny"
 }

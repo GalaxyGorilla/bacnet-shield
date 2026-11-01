@@ -47,6 +47,7 @@ rewritten, and only the front-leg policy can reject a request.
 | SC transport | TLS 1.3 (`crypto/tls`) + a small, fuzzed WebSocket frame parser we own, not a WebSocket dependency. The proxy is always the WebSocket client. The hub is trusted to attribute frames to their originating VMAC; the node still drops a frame addressed to another VMAC or with a zero/missing origin |
 | Device leg | Always plain BACnet/IPv4 over UDP, even when the front leg is SC. The SC leg is additive, not a replacement for the IP listener |
 | Ground truth | ASHRAE 135 wire formats, cross-checked against **bacpypes3 0.0.110** in `.venv`. Vendor divergence is reported in [CONFORMANCE.md](CONFORMANCE.md), never silently adapted away in the proxy |
+| Audit | Opt-in structured stream (`audit.file`), one JSON object per security decision (ACL, rate, device budget, write policy, unsupported subscription), with the decoded target and a closed-set reason for a refused write. Bounded stream: a rotating file (one backup) plus a bounded non-blocking queue that drops-and-counts. Observes decisions; never changes them |
 | No CI | Deliberate user decision across the Shield projects. Gates are local `make` targets |
 
 ## 3. Architecture and code map
@@ -59,7 +60,7 @@ internal/scnet/        SC transport: TLS 1.3, WebSocket framing, node↔hub stat
 internal/access/       Allow-list, per-client token bucket, shared device budget, write policy
 internal/config/       YAML + flags, validation, access-policy compilation
 internal/proxy/        Data plane: routing, invoke IDs, COV, firmware probe
-internal/observ/       zap logger, Prometheus registry, /metrics listener
+internal/observ/       zap logger, Prometheus registry, /metrics listener, audit stream
 internal/safego/       Panic isolation for per-datagram handlers
 internal/watchdog/     sd_notify READY/WATCHDOG
 internal/testkit/      Soak-duration helper shared by test suites
@@ -157,8 +158,9 @@ Reloadable on `SIGHUP`: `access.allow`, `access.sc_allow`,
 
 Restart-only (reported, never silently ignored): `listen_addr`,
 `device_addr`, `device_local_addr`, `device_instance`,
-`request_timeout_secs`, `max_pending`, `log_level`, `metrics.addr`, and the
-whole `sc` block (`vmac`, `uuid`, `hubs`, `ca_file`, `cert_file`, `key_file`).
+`request_timeout_secs`, `max_pending`, `log_level`, `metrics.addr`, `audit.*`,
+and the whole `sc` block (`vmac`, `uuid`, `hubs`, `ca_file`, `cert_file`,
+`key_file`).
 
 The SC leg is configured either as an `sc:` YAML block or with
 `--sc-vmac/--sc-uuid/--sc-hub/--sc-ca/--sc-cert/--sc-key`; `sc_allow` is
@@ -201,12 +203,13 @@ file to re-read and the flags came from the command line.
   flat goroutines/heap and zero unanswered requests.
 - **Independent peer**: `make peers` provisions bacpypes3 0.0.110 in `.venv`;
   `make interop` drives the built binary on both IP legs, including a COV
-  subscription whose notification is triggered by a write and a segmented
-  response the client forces with a small max APDU. `make sc-hub-image`
-  builds bacnet-stack 1.6.1's `sc-hub` + BSC clients in Docker; `make
-  interop-sc` drives the built binary as a node of that hub, including a
-  bacnet-stack COV subscriber. Exit 77 means the peer is absent, not that the
-  product failed.
+  subscription whose notification is triggered by a write, a segmented
+  response the client forces with a small max APDU, and the on-disk audit
+  record of a refused write. `make sc-hub-image` builds bacnet-stack 1.6.1's
+  `sc-hub` + BSC clients in Docker; `make interop-sc` drives the built binary
+  as a node of that hub, including a bacnet-stack COV subscriber and the
+  SC-leg audit record of a refusal. Exit 77 means the peer is absent, not that
+  the product failed.
 - Do not run two full test suites concurrently; fixed ports in the interop
   scripts will collide and look like a product bind error (`interop-sc` also
   binds host port 50050).
@@ -228,6 +231,9 @@ Done in v1:
 - Device source validation with a learned source port.
 - CLI, config validation, `SIGHUP` reload, systemd watchdog, selftest probe.
 - Metrics, logger, panic isolation, soak tests.
+- Opt-in structured audit stream (`internal/observ`): one JSON record per
+  security decision with the decoded write target and a closed-set reason,
+  bounded by a rotating audit file and a non-blocking drop-and-count queue.
 - BVLL-SC codec (`internal/bacnet/sc`): header/options and all node↔hub
   message bodies, golden-byte cross-checked against bacpypes3, with a fuzz
   target for the header (`FuzzParse`) and one for every typed body decoder
@@ -247,13 +253,15 @@ Done in v1:
   notification routing and I-Am fan-out.
 - bacpypes3 interop: read, Who-Is, denied write, SIGHUP reload to an allowed
   write, uncovered write still denied, read-back of the written value, a COV
-  subscription that receives the notification from the client's write, and a
-  segmented response reassembled through the proxy.
+  subscription that receives the notification from the client's write, a
+  segmented response reassembled through the proxy, and the audit file
+  recording the refused write with its decoded target and reason.
 - bacnet-stack SC interop (`make interop-sc`): the proxy joins bacnet-stack
   1.6.1's `sc-hub` in Docker as a node, and bacnet-stack's own BSC clients
-  drive Who-Is, a read, a denied write (tagged Error PDU over SC), a SIGHUP
-  reload to a scoped policy, an allowed write, a read-back, and a COV
-  subscriber that receives the initial and the change-triggered notification.
+  drive Who-Is, a read, a denied write (tagged Error PDU over SC, recorded in
+  the audit with its SC leg and target), a SIGHUP reload to a scoped policy, an
+  allowed write, a read-back, and a COV subscriber that receives the initial
+  and the change-triggered notification.
   This found the originating-VMAC defect recorded in `CONFORMANCE.md`.
 - SC connection-state observability: the node reports attach/detach through a
   state handler, exposed as the `bacnet_shield_sc_connected` gauge and

@@ -67,6 +67,10 @@ bacnet-shield is the boundary instead:
   COV routing as the IP clients, each keyed by its own VMAC.
 - **Change without downtime** — `SIGHUP` swaps the front-leg policy in place;
   clients and the device socket stay up.
+- **Audit trail** — opt-in: every ACL, rate, budget and write decision is
+  appended as one JSON object per line, with the object/property a refused
+  write targeted, so an incident can be reconstructed without guessing from
+  counters.
 
 The v1 essence: a **strict forwarder** — the service payload goes in and out
 byte for byte; only the link/network headers and the APDU invoke ID are
@@ -234,12 +238,38 @@ a clean refusal into a timeout.
 
 **Reload:** `SIGHUP` re-reads the config file and applies **the access policy
 only** — `access.allow`, `access.sc_allow`, `access.rate_per_sec`,
-`access.read_only`, `access.write_policy`. The swap takes effect on the next
-datagram with no listener rebind. Everything socket- or crypto-bound
-(`listen_addr`, `device_addr`, `device_local_addr`, `device_instance`,
-`request_timeout_secs`, `max_pending`, `log_level`, `metrics.addr` and the whole
-`sc` block) is reported as a restart-only warning rather than silently ignored.
-An invalid file, or a policy that does not compile, keeps the running policy.
+`access.device_rate_per_sec`, `access.read_only`, `access.write_policy`. The swap
+takes effect on the next datagram with no listener rebind. Everything socket-,
+file- or crypto-bound (`listen_addr`, `device_addr`, `device_local_addr`,
+`device_instance`, `request_timeout_secs`, `max_pending`, `log_level`,
+`metrics.addr`, `audit.*` and the whole `sc` block) is reported as a
+restart-only warning rather than silently ignored. An invalid file, or a policy
+that does not compile, keeps the running policy.
+
+### Audit trail
+
+Denials are counted and logged, but an incident review needs to answer *"which
+client tried to write what, and when was it refused"*. With `audit.file` set,
+every security decision the front leg makes is appended as one JSON object per
+line:
+
+```json
+{"time":"2026-11-02T09:14:03.512Z","event":"write_denied","leg":"ip","client":"10.8.0.5:51823","service":"write-property","targets":["analog-value,5:present-value"],"reason":"read_only"}
+{"time":"2026-11-02T09:14:04.001Z","event":"acl_denied","leg":"sc","client":"sc:02:00:00:00:00:0a"}
+```
+
+- **Events:** `acl_denied`, `rate_limited`, `device_budget_denied`,
+  `write_denied`, `unsupported_subscription`; `write_denied` carries the decoded
+  `targets` and a stable `reason` (`read_only`, `segmented_write`,
+  `undecodable_write`, `service_level_denied`, `deny_rule`, `default_deny`).
+- **Bounded by construction.** The file rotates at `audit.max_mb` keeping one
+  backup (about 2× the cap on disk); the producer is a bounded queue, so a
+  denial flood drops records and counts them
+  (`bacnet_shield_audit_dropped_total`) rather than stalling the data plane or
+  filling the disk.
+- **Off by default** — like every other Shield control, the audit is opt-in.
+  See [examples/operations.md](examples/operations.md#audit-trail) and the
+  annotated [`configs/gateway.yaml`](configs/gateway.yaml).
 
 ## BACnet/SC
 
@@ -406,6 +436,7 @@ the monitoring network is trusted.
 | `bacnet_shield_replayed_total` | Retransmissions answered from the finished-response cache |
 | `bacnet_shield_retransmits_dropped_total` | Retransmissions dropped while the request is in flight |
 | `bacnet_shield_notifications_dropped_total` | Device notifications with no client to receive them |
+| `bacnet_shield_audit_dropped_total` | Audit records dropped because the audit queue was full |
 | `bacnet_shield_pending` | Requests currently in flight toward the device |
 | `bacnet_shield_cov_subscriptions` | Active COV subscriptions routed by the proxy |
 | `bacnet_shield_sc_connected` | 1 while the BACnet/SC leg is attached to a hub, 0 otherwise |

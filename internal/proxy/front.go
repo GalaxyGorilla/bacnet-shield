@@ -9,6 +9,7 @@ import (
 	"github.com/GalaxyGorilla/bacnet-shield/internal/access"
 	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet"
 	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet/sc"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/observ"
 	"github.com/GalaxyGorilla/bacnet-shield/internal/safego"
 )
 
@@ -95,18 +96,22 @@ func (g *Gateway) handleSCNPDU(orig *sc.MAC, npdu []byte) {
 	g.metrics.Requests.Inc()
 	now := time.Now()
 	pol := g.policy.Load()
+	client := &scPeer{vmac: *orig}
 	switch pol.CheckSC(*orig, now) {
 	case access.DenyACL:
 		g.metrics.ACLDenied.Inc()
-		g.log.Debug("sc client denied by allow-list", zap.Stringer("client", &scPeer{vmac: *orig}))
+		g.audit.Record(observ.AuditEvent{Event: "acl_denied", Leg: "sc", Client: client.String()})
+		g.log.Debug("sc client denied by allow-list", zap.Stringer("client", client))
 		return
 	case access.DenyRate:
 		g.metrics.RateLimited.Inc()
-		g.log.Debug("sc client denied by rate limit", zap.Stringer("client", &scPeer{vmac: *orig}))
+		g.audit.Record(observ.AuditEvent{Event: "rate_limited", Leg: "sc", Client: client.String(), Reason: "per_client_rate"})
+		g.log.Debug("sc client denied by rate limit", zap.Stringer("client", client))
 		return
 	case access.DenyDevice:
 		g.metrics.DeviceRateLimited.Inc()
-		g.log.Debug("sc client denied by the shared device budget", zap.Stringer("client", &scPeer{vmac: *orig}))
+		g.audit.Record(observ.AuditEvent{Event: "device_budget_denied", Leg: "sc", Client: client.String(), Reason: "device_budget"})
+		g.log.Debug("sc client denied by the shared device budget", zap.Stringer("client", client))
 		return
 	}
 
