@@ -65,6 +65,8 @@ internal/watchdog/     sd_notify READY/WATCHDOG
 internal/testkit/      Soak-duration helper shared by test suites
 configs/gateway.yaml   Annotated example
 deploy/                Hardened systemd unit
+examples/              Deployment walkthroughs (gateway, access control, SC, operations)
+docs/assets/           README logo
 scripts/               bacpypes3 peer provisioning and interop drivers
 ```
 

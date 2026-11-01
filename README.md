@@ -1,38 +1,57 @@
-# BACnet Shield
+<h1><a href="https://saschakattelmann.de"><img src="docs/assets/sascha-kattelmann-logo.png" alt="" height="42" align="absmiddle"></a>&#8202; BACnet Shield</h1>
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/GalaxyGorilla/bacnet-shield.svg)](https://pkg.go.dev/github.com/GalaxyGorilla/bacnet-shield)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
 A **BACnet/IP security proxy** for one legacy building device. One static
-binary. The device keeps speaking plain BACnet/IP; the proxy does the
+binary. The device keeps speaking plain BACnet/IP; the proxy does all the
 shielding work between it and the building's clients.
 
-**Status:** the documented v1 data plane is complete, and the BACnet/SC secure
-front leg now shares it. The protocol codecs are fuzzed, the data plane is
-race-tested, and independent stacks drive the built binary on both legs:
-bacpypes3 for BACnet/IP, and bacnet-stack's own `sc-hub` plus BSC clients for
-BACnet/SC. Physical device commissioning is still required; see
-[Production readiness](#production-readiness).
+**Status:** production-ready for the documented v1 software scope. The protocol
+codecs are fuzzed, the data plane is race-tested, and independent stacks drive
+the built binary on both legs: bacpypes3 for BACnet/IP, and bacnet-stack's own
+`sc-hub` plus BSC clients for BACnet/SC. Physical-device commissioning is still
+required; see [Production readiness](#production-readiness).
 
-```
-[N clients] --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [legacy device]
-[N SC nodes] --BACnet/SC--> [existing hub] --> [bacnet-shield] --BACnet/IP-->
+**Never heard of BACnet?** Read the [two-minute primer](examples/gateway.md#0-two-minutes-of-bacnet-background)
+below the fold — everything else in this document assumes only that.
+
+```mermaid
+flowchart LR
+    C["Existing clients<br/>BMS · SCADA · engineering tool"]
+    S["bacnet-shield<br/>allow-list · rate limit · write policy"]
+    D["Legacy device<br/>unchanged"]
+    N["BACnet/SC clients"] -.->|"via an existing hub"| S
+    C -->|"BACnet/IP"| S
+    S -->|"plain BACnet/IP"| D
 ```
 
-Clients keep using their existing BACnet tools. They point at the proxy instead
-of the device; that repointing is the whole migration. The proxy forwards the
-service payload byte for byte and rewrites only what routing requires: the
-link/network headers and the APDU invoke ID.
+**Choose your starting point:**
+
+- One legacy device, point your clients at the box →
+  [gateway walkthrough](examples/gateway.md).
+- Decide who may connect, how hard they may poll, and which writes pass →
+  [access control](examples/access-control.md).
+- Secure clients (BACnet/SC) in front of the same device →
+  [SC front leg](examples/sc.md).
+- The box is running — install, commission, monitor, reload, troubleshoot →
+  [operations](examples/operations.md).
+
+If you are unsure, start with the [gateway walkthrough](examples/gateway.md).
 
 ## Why
 
 BACnet/IP is a clear, unauthenticated protocol designed for building
 automation. A controller that has been in a wall for fifteen years cannot be
-given authentication, an ACL or a write policy. Replacing it is expensive, and
-its firmware is not yours to change.
+given authentication, an ACL or a write policy. Replacing it is an expensive
+commissioning project, and its firmware is not yours to change.
 
 bacnet-shield is the boundary instead:
 
 - **Zero-touch on the device** — no firmware change, no object or property
   remapping. Vendor quirks inside service payloads pass through untouched.
-- **Client allow-list** — only the BMS/SCADA segment reaches the device.
+- **Client allow-list** — only the BMS/SCADA segment reaches the device; an
+  off-list peer is dropped silently.
 - **Per-client rate limit** — one runaway poller cannot spend the device's
   capacity for everyone else.
 - **Write protection** — either all-or-nothing read-only, or rules scoped to
@@ -41,17 +60,91 @@ bacnet-shield is the boundary instead:
   (class `security`, code `write-access-denied`), so the client fails
   immediately instead of timing out.
 - **COV routing** — a client's SubscribeCOV is remembered, and the device's
-  notifications are delivered back to that client.
+  notifications are delivered back to that client, never broadcast.
 - **Secure front leg** — BACnet/SC clients attach through an existing hub over
-  TLS 1.3 + WebSocket; they get the same allow-list, rate limit, write policy
-  and COV routing as the IP clients, each keyed by its own VMAC.
-- **Config reload without downtime** — `SIGHUP` swaps the front-leg policy in
-  place; clients and the device socket stay up.
+  TLS 1.3 + WebSocket and get the same allow-list, rate limit, write policy and
+  COV routing as the IP clients, each keyed by its own VMAC.
+- **Change without downtime** — `SIGHUP` swaps the front-leg policy in place;
+  clients and the device socket stay up.
+
+The v1 essence: a **strict forwarder** — the service payload goes in and out
+byte for byte; only the link/network headers and the APDU invoke ID are
+rewritten, and only the front-leg policy can reject a request.
+
+## Is bacnet-shield the right tool?
+
+Not always. Prefer the simplest boundary that solves the problem:
+
+- **The device already speaks BACnet/SC** — enable it on the device and let it
+  join the hub directly; a proxy adds no security benefit to a device that can
+  already authenticate and encrypt its own traffic.
+- **Only the network path needs protection, and clients are trusted** — a
+  firewall rule or a site-to-site VPN (WireGuard/IPsec) segmenting the building
+  network may be simpler.
+- **You need a BACnet router, a BBMD, or a protocol translator** — bacnet-shield
+  is a transport-level security gate for **one** device; it does not route
+  between networks or remap the object model. Use a building-controller gateway
+  for that.
+
+Use bacnet-shield when the legacy device cannot change and you need an
+appliance-like security gate in front of it: an allow-list, a per-client rate
+limit, an object/property-scoped write policy, optional BACnet/SC, Prometheus
+metrics, config validation and self-tests, a static binary and a hardened
+systemd unit. It is intentionally opinionated about deployment and operations.
+
+## Production readiness
+
+The documented v1 scope is implemented and tested as software. The race suite
+drives the built proxy on real loopback sockets; nine native fuzz targets —
+the BVLC/NPDU/APDU/tag/object-ID codecs, the BVLL-SC body decoders and the
+WebSocket frame parser — run in every `go test`; and two independent BACnet
+stacks drive the built binary through the proxy — bacpypes3 (a Python stack) on
+the IP leg and bacnet-stack 1.6.1's own `sc-hub` and BSC clients on the secure
+leg. Reads,
+writes, refusals, discovery, COV, segmented responses, reload and hub failover
+are covered in addition to the race suite. The repository also supplies a
+hardened service unit, health metrics, configuration validation, self-tests and
+operational diagnostics.
+
+**Known validation boundary:** the project has not yet been commissioned against
+physical BACnet devices. Before relying on a specific installation, test it with
+the real controller and the real vendor client: frame timing, retransmission
+behaviour, COV lifetimes, segmented responses, device source-port changes and
+network interruption. This is deployment validation, not unfinished
+functionality in the documented scope. External security review and formal
+BACnet conformance testing remain separate work; [`TESTING.md`](TESTING.md)
+records the exact test coverage and [`CONFORMANCE.md`](CONFORMANCE.md) records
+what the independent stacks found.
+
+The commercial value is the retrofit boundary: operators can add identity,
+scoped writes, rate limits and a standard secure transport without replacing the
+installed asset or matching its object model. That also makes bacnet-shield
+suitable as the BACnet module in a broader multi-protocol critical-infrastructure
+appliance; appliance-level orchestration remains outside this repository.
+
+## Deployment shape
+
+**Not sure which shape is yours?** The one-line picker:
+
+- "I just want a proxy in front of the device" → [Gateway](examples/gateway.md)
+- "I need to decide who may connect and write" → [Access control](examples/access-control.md)
+- "My clients speak BACnet/SC (or a hub already exists)" → [SC front leg](examples/sc.md)
+- "Plant SCADA should monitor the proxy itself" → [Operations](examples/operations.md#monitor)
+
+| Start here | Your situation | What changes |
+|---|---|---|
+| [Gateway](examples/gateway.md) | One legacy BACnet/IP device, one or more clients | Clients point at bacnet-shield; the device stays unchanged |
+| [Access control](examples/access-control.md) | Different clients deserve different rights | Add an allow-list, a rate limit, and a scoped write policy |
+| [SC front leg](examples/sc.md) | Clients or a head-end speak BACnet/SC | The proxy joins an existing hub as a node; the device stays plain IP |
+| [Operations](examples/operations.md) | The box is deployed | Install as a service, commission, monitor, reload, troubleshoot |
+
+Planned work and explicit non-goals are recorded in [BACKLOG.md](BACKLOG.md):
+multi-device instances, a BBMD/router role, segmented-write decoding and
+UUID-keyed SC admission are deliberately out of the v1 scope.
 
 ## Scope
 
-This is a **single-device gateway**, not a BACnet device stack and not a
-router.
+This is a **single-device gateway**, not a BACnet device stack and not a router.
 
 | Supported | Deliberately not supported (v1) |
 |---|---|
@@ -63,15 +156,90 @@ router.
 | Segmented requests and responses (except segmented writes) | Segmented writes (denied fail-closed) |
 | IPv4 BACnet/IP on the device leg | BACnet/IPv6 |
 
-BACnet/SC is the standard secure front leg (TLS 1.3 + WebSocket, BVLC-SC
-`0x82`). It is deliberately not replaced by a private tunnel: the point is a
-standard boundary, not another proprietary one.
+A client broadcast is forwarded to the one device as **unicast**: the proxy has
+exactly one device, so a broadcast is a discovery request aimed at it.
+
+## Security controls
+
+Every deployment has a client leg with peers you may or may not trust, so the
+same `access` section governs all of it: **who** may connect, **how fast**, and
+**what may be written**. The rules are identical for an IP client (keyed by
+`ip:port`) and a BACnet/SC client (keyed by `vmac`), which is what lets both
+front legs share one policy. See [access-control.md](examples/access-control.md)
+for the full walkthrough.
+
+```yaml
+access:
+  allow: ["10.8.0.0/24", "192.168.1.7"]   # client allow-list (IP or CIDR)
+  sc_allow: ["02:00:00:00:00:0a"]         # SC allow-list (VMAC)
+  rate_per_sec: 50                        # per-client request rate (0 = off)
+  read_only: true                         # refuse every write
+  # ...or, instead of read_only, a scope-limited write policy:
+  # write_policy:
+  #   default: deny
+  #   rules:
+  #     - {oid: "analog-value:5:present-value", action: allow}
+  #     - {oid: "analog-value:*:present-value", action: deny}
+```
+
+`read_only` and `write_policy` are mutually exclusive; both at once is a config
+error. `allow`, `sc_allow` and `rate_per_sec` are independent and optional.
+Write protection is **opt-in** — with neither configured, writes pass through
+unchanged — so turn it on deliberately.
+
+The write-policy evaluation rules are intentionally the same as the other Shield
+proxies:
+
+- **Deny overrides.** One matching deny rejects the whole request, so a
+  WritePropertyMultiple can never straddle a forbidden object.
+- **Allow must cover.** An allow authorizes a request only if it matches every
+  object/property the request touches.
+- **Uncovered requests take the default.** `default: deny` is an allow-list;
+  `default: allow` is a deny-list.
+- **Fail closed on the undecodable.** A write whose target cannot be decoded is
+  denied, never forwarded "because we could not tell".
+- **Segmented writes are denied.** The policy would see only the first segment,
+  so a client could hide a forbidden target in a later one.
+- **Service-level writes need the default.** CreateObject, DeleteObject,
+  ReinitializeDevice, DeviceCommunicationControl, file writes, list edits and
+  the other state-changing services have no object target to match, so only
+  `default: allow` authorizes them.
+
+Rule vocabulary is `<object-type>:<instance>:<property>`, with `*` in any part.
+`analog-value:5` means every property of that object; `*` means every write. An
+object type or property may be a name (`analog-value`, `present-value`) or its
+ASHRAE 135 number. The same rules are available as flags: `--write-default`,
+`--write-allow` and `--write-deny`.
+
+Denials are explicit per policy class:
+
+| Situation | Wire result |
+|---|---|
+| Off-list client, or over the rate limit | Silent drop (never advertise the proxy) |
+| Write refused by policy | Error PDU, class `security` (4), code `write-access-denied` (40) |
+| Unsupported subscription service | Error PDU, class `services` (5), code `service-request-denied` (29) |
+| Confirmed COV notification with no subscriber | Error PDU, class `services` (5), code `unknown-subscription` (79) |
+| Malformed frame, unsupported BVLC function, network message | Dropped and counted; never guessed at |
+
+The error parameters are **application-tagged ENUMERATEDs**, the form a strict
+BACnet stack expects; a raw-octet payload would be dropped by the peer and turn
+a clean refusal into a timeout.
+
+**Reload:** `SIGHUP` re-reads the config file and applies **the access policy
+only** — `access.allow`, `access.sc_allow`, `access.rate_per_sec`,
+`access.read_only`, `access.write_policy`. The swap takes effect on the next
+datagram with no listener rebind. Everything socket- or crypto-bound
+(`listen_addr`, `device_addr`, `device_local_addr`, `device_instance`,
+`request_timeout_secs`, `max_pending`, `log_level`, `metrics.addr` and the whole
+`sc` block) is reported as a restart-only warning rather than silently ignored.
+An invalid file, or a policy that does not compile, keeps the running policy.
 
 ## BACnet/SC
 
 The proxy attaches to an **existing** hub as one node, so the hub keeps doing
 its job: authenticating connections and routing between nodes. The clear device
-leg stays plain BACnet/IP, exactly as in the IP-only deployment.
+leg stays plain BACnet/IP, exactly as in the IP-only deployment. The secure leg
+is additive — the IP listener stays up.
 
 ```yaml
 sc:
@@ -98,115 +266,24 @@ every other Shield control.
 
 The proxy rejects a node's frame addressed to another VMAC and a frame without
 an originating VMAC, even though the hub should already have routed it
-correctly. It does not implement address resolution, so the allow-list is keyed
-by VMAC only; a UUID-keyed rule would need that exchange and is backlog.
+correctly, and it never asserts its own originating VMAC on the way out. It does
+not implement address resolution, so the allow-list is keyed by VMAC only; a
+UUID-keyed rule would need that exchange and is backlog.
 
 Flags mode has the same surface: `--sc-vmac`, `--sc-uuid`, `--sc-hub`,
 `--sc-ca`, `--sc-cert`, `--sc-key` and `--sc-allow`.
 
 A hub outage does not stop the IP leg: the node logs the failure and reconnects
 with backoff across the configured hub list. Systemd readiness means the IP
-listener is bound; the SC connection state is logged, not used as a readiness
-gate.
-
-## Quick start
-
-Build with the plain Go toolchain (no other build dependency):
-
-```bash
-make            # or: go build -o bin/bacnet-shield ./cmd/bacnet-shield
-```
-
-### Flags only
-
-```bash
-# everybody may read; nobody may write; only the BMS segment may connect
-bacnet-shield gateway \
-  --listen :47808 \
-  --device 10.0.0.42:47808 \
-  --read-only \
-  --allow 10.8.0.0/24 \
-  --rate-per-sec 50
-```
-
-Point the clients at the proxy address instead of the device. If the proxy and
-device share a host, give the proxy a different client port (for example
-`:47809`).
-
-### YAML
-
-One file describes one proxy instance. Start from
-[`configs/gateway.yaml`](configs/gateway.yaml):
-
-```bash
-bacnet-shield gateway --config /etc/bacnet-shield/gateway.yaml
-```
-
-Reload the ACL, rate limit and write policy in place:
-
-```bash
-kill -HUP "$(cat /run/bacnet-shield.pid)"
-# or: systemctl reload bacnet-shield-gateway
-```
-
-`listen_addr`, `device_addr`, `device_local_addr`, `device_instance`,
-`request_timeout_secs`, `max_pending`, `log_level`, `metrics.addr` and the
-whole `sc` block (VMAC, UUID, hubs, TLS) need a restart; a reload reports them
-as warnings instead of silently keeping the old value. The `access` block,
-including `sc_allow`, is reloadable.
-
-### Write policy
-
-Read-only is the coarse switch. The fine-grained form answers *which* writes
-may pass:
-
-```yaml
-access:
-  write_policy:
-    default: deny
-    rules:
-      - oid: "analog-value:5:present-value"
-        action: allow        # one writable setpoint
-      - oid: "analog-value:*:present-value"
-        action: deny         # deny wins over allow
-```
-
-Rule vocabulary is `<object-type>:<instance>:<property>`, with `*` in any
-part. `analog-value:5` means every property of that object; `*` means every
-write. An object type or property may be a name (`analog-value`,
-`present-value`) or its ASHRAE 135 number.
-
-The evaluation rules are intentionally the same as the other Shield proxies:
-
-- **Deny overrides.** One matching deny rejects the whole request, so a
-  WritePropertyMultiple can never straddle a forbidden object.
-- **Allow must cover.** An allow authorizes a request only if it matches
-  every object/property the request touches.
-- **Uncovered requests take the default.** `default: deny` is an allow-list;
-  `default: allow` is a deny-list.
-- **Fail closed on the undecodable.** A write whose target cannot be decoded
-  is denied, never forwarded "because we could not tell".
-- **Segmented writes are denied.** The policy would see only the first
-  segment, so a client could hide a forbidden target in a later one.
-- **Service-level writes need the default.** CreateObject, DeleteObject,
-  ReinitializeDevice, DeviceCommunicationControl, file writes, list edits and
-  the other state-changing services have no object target to match, so only
-  `default: allow` authorizes them.
-
-`read_only` and `write_policy` are mutually exclusive; both at once is a
-config error. The same rules are available as flags:
-`--write-default`, `--write-allow` and `--write-deny`.
-
-If neither `read_only` nor `write_policy` is configured, writes are forwarded
-unchanged: like the other Shield proxies, write protection is opt-in. The
-example config sets `read_only: true`, and a deployment that only means to
-filter reads should set it explicitly.
+listener is bound; the SC link state is on the metrics endpoint
+(`bacnet_shield_sc_connected`) and in the log, not used as a readiness gate. See
+[sc.md](examples/sc.md).
 
 ## How it works
 
-The proxy is a strict forwarder with three pieces of state. Both front legs
-feed the same state: a client is a client whether its identity is `ip:port` or
-a 6-octet SC VMAC, which is what keeps two SC nodes from sharing an invoke-ID
+The proxy is a strict forwarder with three pieces of state. Both front legs feed
+the same state: a client is a client whether its identity is `ip:port` or a
+6-octet SC VMAC, which is what keeps two SC nodes from sharing an invoke-ID
 space.
 
 1. **Invoke-ID translation.** Every client has its own one-octet invoke-ID
@@ -226,22 +303,86 @@ space.
    subscriber is answered with an Error PDU so the device stops retransmitting.
 
 Segmented responses and device-initiated segmented requests are tracked per
-invoke ID and relayed; the proxy does not reassemble the payload.
+invoke ID and relayed; the proxy does not reassemble the payload. Every state
+table is bounded and swept once per second, and a soak test asserts flat
+goroutines/heap with zero unanswered requests.
 
-Denials are explicit per policy class:
+## Quick start
 
-| Situation | Wire result |
-|---|---|
-| Off-list client, or over the rate limit | Silent drop (never advertise the proxy) |
-| Write refused by policy | Error PDU, class `security` (4), code `write-access-denied` (40) |
-| Unsupported subscription service | Error PDU, class `services` (5), code `service-request-denied` (29) |
-| Confirmed COV notification with no subscriber | Error PDU, class `services` (5), code `unknown-subscription` (79) |
-| Malformed frame, unsupported BVLC function, network message | Dropped and counted; never guessed at |
+Build (plain Go toolchain, no other build dependency):
+
+```bash
+make            # or: go build -o bin/bacnet-shield ./cmd/bacnet-shield
+```
+
+### Plug and play (no config file)
+
+```bash
+# everybody may read; nobody may write; only the BMS segment may connect
+bacnet-shield gateway \
+  --listen :47808 \
+  --device 10.0.0.42:47808 \
+  --read-only \
+  --allow 10.8.0.0/24 \
+  --rate-per-sec 50
+```
+
+Point the clients at the proxy address instead of the device. If the proxy and
+the device share a host, give the proxy a different client port (for example
+`:47809`). Full walkthrough: [examples/gateway.md](examples/gateway.md).
+
+### Scoped writes instead of all-or-nothing
+
+```bash
+# reads open; only analog-value 5's setpoint may be written, for anyone
+bacnet-shield gateway \
+  --listen :47808 --device 10.0.0.42:47808 --allow 10.8.0.0/24 \
+  --write-default deny \
+  --write-allow 'analog-value:5:present-value'
+# 'analog-value:*:present-value' matches every instance of the type; a deny
+# rule wins over an allow, and an allow must cover the whole write target.
+```
+
+### Config files
+
+One file describes one proxy instance. Start from
+[`configs/gateway.yaml`](configs/gateway.yaml):
+
+```bash
+bacnet-shield gateway --config /etc/bacnet-shield/gateway.yaml
+
+# apply edited ACLs, rate limit and write policy without dropping clients:
+kill -HUP "$(cat /run/bacnet-shield.pid)"   # or: systemctl reload bacnet-shield-gateway
+```
+
+## Tools
+
+```bash
+# check a config without running (pre-apply hook for tooling/web UIs):
+bacnet-shield validate --config gateway.yaml
+bacnet-shield validate --config gateway.yaml --json   # machine-readable
+
+# validate + probe the device with a real request; --probe=false skips the network:
+bacnet-shield selftest --config gateway.yaml
+bacnet-shield selftest --config gateway.yaml --probe=false
+
+bacnet-shield version
+```
+
+`selftest` sends one real request from this host to the device leg. With a
+pinned `device_instance` it reads `device,<instance>,object-name`; without one
+it sends a Who-Is and reports the first I-Am from the configured address. A
+BACnet Error PDU counts as reachability (the device answered) and is reported
+with its class and code. Both `validate` and `selftest` accept the same flags as
+`gateway` (or `--config`), so a web UI can build the form, validate with
+`validate --json`, and offer a "test connection" button backed by
+`selftest --json`.
 
 ## Metrics
 
 Set `metrics.addr` (or `--metrics-addr`) to expose a Prometheus scrape at
-`/metrics`. An empty address disables the listener.
+`/metrics`. An empty address disables the listener; bind it to loopback unless
+the monitoring network is trusted.
 
 | Metric | Meaning |
 |---|---|
@@ -262,22 +403,6 @@ Set `metrics.addr` (or `--metrics-addr`) to expose a Prometheus scrape at
 | `bacnet_shield_sc_connected` | 1 while the BACnet/SC leg is attached to a hub, 0 otherwise |
 | `bacnet_shield_sc_reconnects_total` | Successful re-attaches to a hub after the first connection |
 
-## Tools
-
-```bash
-bacnet-shield validate --config gateway.yaml        # check a config, do not run
-bacnet-shield validate --config gateway.yaml --json # machine-readable
-bacnet-shield selftest --config gateway.yaml         # validate + probe the device
-bacnet-shield selftest --config gateway.yaml --probe=false
-bacnet-shield version
-```
-
-`selftest` sends one real request from this host to the device leg. With a
-pinned `device_instance` it reads `device,<instance>,object-name`; without one
-it sends a Who-Is and reports the first I-Am from the configured address. A
-BACnet Error PDU counts as reachability (the device answered) and is reported
-with its class and code.
-
 ## Appliance deployment
 
 - **Static binary** — `make release` builds a stripped, CGO-free binary for
@@ -287,27 +412,13 @@ with its class and code.
   is a hardened `Type=notify` unit with a 30 s watchdog, `Restart=on-failure`
   and a restricted address-family list (`AF_UNIX` is included for sd_notify).
   The binary sends `READY=1` only after both sockets bind and pings
-  `WATCHDOG=1` while running.
+  `WATCHDOG=1` while running, so a bind failure is never advertised as ready and
+  a wedged process is restarted by the host.
 - **Supply chain** — `make sbom` produces SPDX + CycloneDX documents for the
   release binary (`syft`); `make vulnscan` scans them with `grype` and fails on
   HIGH or worse. Both exit 77 when the tool is missing.
 - **No CI by design.** The gates are `make` targets run locally; see
-  [TESTING.md](TESTING.md).
-
-## Production readiness
-
-The documented v1 scope is implemented and tested as software. The suite
-covers the codecs (including fuzz targets), policy semantics, invoke-ID
-translation, retransmission dedupe, COV routing, segmented exchanges, reload,
-shutdown, systemd readiness and an independent client/device pair.
-
-**Validation boundary:** the project has not yet been commissioned against
-physical BACnet devices. Before relying on an installation, test it with the
-real controller and the real vendor client: frame timing, retransmission
-behaviour, COV lifetimes, segmented responses, device source-port changes and
-network interruption. This is deployment validation, not unfinished
-functionality in the documented scope. External security review and formal
-BACnet conformance testing are separate work.
+  [TESTING.md](TESTING.md) and [examples/operations.md](examples/operations.md).
 
 ## Testing
 
@@ -329,9 +440,11 @@ make sc-hub-image  # builds bacnet-stack 1.6.1's sc-hub in Docker
 ```
 
 Each exits 77 when its peer is missing, so a bare machine stays green; a
-release run treats that as a failure. See [TESTING.md](TESTING.md) for the
-layers and [CONFORMANCE.md](CONFORMANCE.md) for what the independent stacks
-found.
+release run treats that as a failure. The suite is deliberately adversarial —
+malformed and truncated frames, spoofed sources, invoke-ID collisions,
+retransmissions, write-policy straddles, segmented bypasses and unknown
+subscriptions, not only happy paths. See [TESTING.md](TESTING.md) for the layers
+and [CONFORMANCE.md](CONFORMANCE.md) for what the independent stacks found.
 
 The SC leg is covered by the same races: the BVLL-SC codec is golden-byte
 cross-checked against bacpypes3, the WebSocket parser is fuzzed, and the node is
@@ -343,17 +456,20 @@ the SC transport is also proven against a third-party implementation.
 
 ## Documentation
 
-- [`AGENTS.md`](AGENTS.md) — architecture, wire-level invariants and
-  maintenance rules.
-- [`TESTING.md`](TESTING.md) — test layers, commands and security regressions.
+- [`examples/`](examples/) — copy-paste walkthroughs with a scenario picker:
+  [gateway](examples/gateway.md) (start here; includes a two-minute BACnet
+  primer), access control, the SC front leg, and the operations guide.
+- [`configs/gateway.yaml`](configs/gateway.yaml) — annotated configuration.
+- [`deploy/`](deploy/) — hardened systemd unit.
 - [`SECURITY.md`](SECURITY.md) — protected assets, trust boundaries, enforced
   controls and deliberate limits.
+- [`TESTING.md`](TESTING.md) — test layers and release/security gates.
 - [`CONFORMANCE.md`](CONFORMANCE.md) — independent-peer results, divergences
   and deliberate limits.
 - [`BACKLOG.md`](BACKLOG.md) — what is planned and what is explicitly out of
   scope.
-- [`configs/gateway.yaml`](configs/gateway.yaml) — annotated configuration.
-- [`deploy/`](deploy/) — systemd unit.
+- [`AGENTS.md`](AGENTS.md) — architecture, wire-level invariants and the
+  maintenance rules.
 
 ## License
 
