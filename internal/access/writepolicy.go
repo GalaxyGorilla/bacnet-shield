@@ -90,9 +90,6 @@ func NewWritePolicy(readOnly bool, def Action, rules []Rule) (*WritePolicy, erro
 	return p, nil
 }
 
-// ReadOnly reports whether the policy denies every write.
-func (p *WritePolicy) ReadOnly() bool { return p != nil && p.readOnly }
-
 func compileRule(r Rule) (rule, error) {
 	var c rule
 	switch r.Action {

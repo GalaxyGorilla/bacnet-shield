@@ -1,14 +1,22 @@
 package main
 
 import (
+	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/pflag"
+	"go.uber.org/zap"
 
+	"github.com/GalaxyGorilla/bacnet-shield/internal/access"
 	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet"
 	"github.com/GalaxyGorilla/bacnet-shield/internal/config"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/observ"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/proxy"
 )
 
 // fakeDevice is a minimal BACnet device on a real UDP socket: it answers
@@ -64,6 +72,9 @@ func (d *fakeDevice) serve(instance uint32) {
 			payload = append(payload, 0x3E, 0x75, 0x04, 't', 'e', 's', 't', 0x3F)
 			reply = bacnet.APDU{Type: bacnet.PDUComplexACK, InvokeID: a.InvokeID, HasInvokeID: true,
 				HasService: true, Service: bacnet.ServiceReadProperty, Payload: payload}
+		case bacnet.ServiceWriteProperty:
+			reply = bacnet.APDU{Type: bacnet.PDUSimpleACK, InvokeID: a.InvokeID, HasInvokeID: true,
+				HasService: true, Service: bacnet.ServiceWriteProperty}
 		default:
 			continue
 		}
@@ -229,6 +240,113 @@ func TestRestartOnlyChanges(t *testing.T) {
 			t.Errorf("%s change not reported: %v", want, got)
 		}
 	}
+}
+
+// TestReloadSwapsAccessPolicy drives the real reload path on a running
+// gateway: the previous unit tests only covered restartOnlyChanges, so a bug
+// that compiled the new policy but never installed it would have slipped
+// through. It is deliberately end to end — a real client datagram against a
+// real bound socket and a fake device — because the policy is only observable
+// in the forwarding decision.
+func TestReloadSwapsAccessPolicy(t *testing.T) {
+	dev := newFakeDevice(t, 1001)
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "gateway.yaml")
+
+	// Bind first (port 0 = ephemeral), then write a config that names the real
+	// port. The listener address in the file is only used for the restart-only
+	// comparison; the policy is what reload installs.
+	readOnly, err := access.NewWritePolicy(true, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := zap.NewNop()
+	g, err := proxy.New(proxy.Config{
+		ListenAddr:     "127.0.0.1:0",
+		DeviceAddr:     dev.addr(),
+		RequestTimeout: 2 * time.Second,
+		MaxPending:     16,
+	}, access.NewPolicy(nil, nil, readOnly), log, observ.NewMetrics())
+	if err != nil {
+		t.Fatalf("gateway: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = g.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); _ = g.Close() })
+
+	base := "listen_addr: " + g.ClientAddr().String() + "\ndevice_addr: " + dev.addr() + "\n"
+	writeCfg := func(accessBlock string) {
+		t.Helper()
+		if err := os.WriteFile(cfgPath, []byte(base+accessBlock), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCfg("access:\n  read_only: true\n")
+
+	cur, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	conn, err := net.DialUDP("udp4", nil, g.ClientAddr())
+	if err != nil {
+		t.Fatalf("client dial: %v", err)
+	}
+	defer conn.Close()
+
+	write := writeAPDU(bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 1}, bacnet.PropertyPresentValue)
+
+	// Read-only: the write is refused locally and the device never sees it.
+	if got := sendRecvAPDU(t, conn, writeFrame(write)); got.Type != bacnet.PDUError {
+		t.Fatalf("read-only write reply = %s, want error", got.Type)
+	}
+
+	// Flip the file to a default-deny policy that allows exactly this write,
+	// then run the real reload path on the running gateway.
+	writeCfg("access:\n  write_policy:\n    default: deny\n    rules:\n" +
+		"      - oid: \"analog-value:1:present-value\"\n        action: allow\n")
+	reload(&config.Options{ConfigPath: cfgPath}, cur, g, log)
+
+	// Same client, same process: the write now reaches the fake device and its
+	// SimpleACK is relayed back.
+	got := sendRecvAPDU(t, conn, writeFrame(write))
+	if got.Type != bacnet.PDUSimpleACK || got.Service != bacnet.ServiceWriteProperty {
+		t.Fatalf("post-reload write reply = %s/%d, want simple-ack/write-property", got.Type, got.Service)
+	}
+}
+
+// writeFrame wraps a client APDU as a unicast BACnet/IP frame.
+func writeFrame(a bacnet.APDU) []byte {
+	return bacnet.BVLC{Function: bacnet.BVLCOriginalUnicastNPDU,
+		Data: bacnet.NPDU{APDU: a.Marshal()}.Marshal()}.Marshal()
+}
+
+// sendRecvAPDU sends one frame and decodes the first reply APDU.
+func sendRecvAPDU(t *testing.T, conn *net.UDPConn, frame []byte) bacnet.APDU {
+	t.Helper()
+	if _, err := conn.Write(frame); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 65535)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("recv: %v", err)
+	}
+	b, err := bacnet.ParseBVLC(buf[:n])
+	if err != nil {
+		t.Fatalf("reply bvlc: %v", err)
+	}
+	np, err := bacnet.ParseNPDU(b.Data)
+	if err != nil {
+		t.Fatalf("reply npdu: %v", err)
+	}
+	a, err := bacnet.ParseAPDU(np.APDU)
+	if err != nil {
+		t.Fatalf("reply apdu: %v", err)
+	}
+	return a
 }
 
 func TestParseFlagsHelpAndArguments(t *testing.T) {

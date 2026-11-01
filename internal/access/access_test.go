@@ -8,29 +8,6 @@ import (
 	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet"
 )
 
-func mustHex(t *testing.T, s string) []byte {
-	t.Helper()
-	b := make([]byte, len(s)/2)
-	for i := 0; i < len(b); i++ {
-		var v byte
-		for j := 0; j < 2; j++ {
-			c := s[i*2+j]
-			switch {
-			case c >= '0' && c <= '9':
-				v = v<<4 | (c - '0')
-			case c >= 'a' && c <= 'f':
-				v = v<<4 | (c - 'a' + 10)
-			case c >= 'A' && c <= 'F':
-				v = v<<4 | (c - 'A' + 10)
-			default:
-				t.Fatalf("bad hex %q", s)
-			}
-		}
-		b[i] = v
-	}
-	return b
-}
-
 // writeProperty builds a WriteProperty APDU for one object/property.
 func writeProperty(t *testing.T, oid bacnet.ObjectID, prop bacnet.PropertyID) bacnet.APDU {
 	t.Helper()

@@ -194,6 +194,8 @@ Known boundaries:
 6. Keep `read_only` and `write_policy` mutually exclusive. A config that looks
    restrictive and is not is worse than a config error.
 7. Update this file and the README when behavior or the config surface
-   changes. Update `CONFORMANCE.md` when a peer finds a divergence.
+   changes. Update `CONFORMANCE.md` when a peer finds a divergence, and
+   `SECURITY.md` when a protected asset, trust boundary or enforced control
+   changes.
 8. Do not push unless the user asks. Commits stay local by default across the
    Shield projects.

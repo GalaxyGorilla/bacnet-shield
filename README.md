@@ -281,6 +281,8 @@ found.
 - [`AGENTS.md`](AGENTS.md) — architecture, wire-level invariants and
   maintenance rules.
 - [`TESTING.md`](TESTING.md) — test layers, commands and security regressions.
+- [`SECURITY.md`](SECURITY.md) — protected assets, trust boundaries, enforced
+  controls and deliberate limits.
 - [`CONFORMANCE.md`](CONFORMANCE.md) — independent-peer results, divergences
   and deliberate limits.
 - [`BACKLOG.md`](BACKLOG.md) — what is planned and what is explicitly out of

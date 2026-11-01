@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -61,8 +62,11 @@ type Metrics struct {
 // NewMetrics builds an isolated registry with the gateway instruments.
 func NewMetrics() *Metrics {
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(prometheus.NewGoCollector())
-	reg.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	// Process-wide Go and process collectors: an appliance dashboard needs
+	// goroutine and RSS numbers next to the protocol counters, and the local
+	// registry means a second Metrics in a test does not collide.
+	reg.MustRegister(collectors.NewGoCollector())
+	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	f := promauto.With(reg)
 	return &Metrics{
 		reg:                  reg,

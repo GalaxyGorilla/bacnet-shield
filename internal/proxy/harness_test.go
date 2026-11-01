@@ -150,8 +150,6 @@ func newTestClient(t *testing.T) *testClient {
 	return &testClient{t: t, conn: conn}
 }
 
-func (c *testClient) addr() *net.UDPAddr { return c.conn.LocalAddr().(*net.UDPAddr) }
-
 func (c *testClient) send(a bacnet.APDU, to *net.UDPAddr) {
 	c.t.Helper()
 	c.sendNPDU(bacnet.NPDU{}, a, to)
