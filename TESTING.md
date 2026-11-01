@@ -13,7 +13,7 @@ local `make` target.
 | SC transport | Real in-process TLS 1.3 hub: connect handshake, heartbeat and heartbeat *timeout* (a hub that stops ACKing is dropped), reconnect and failover across a hub list, hostname verification, destination/origin filtering, and survival of a malformed frame and a non-binary WebSocket message |
 | SC data plane | In-memory SC leg: two clients with the same invoke ID, an IP and an SC client sharing an invoke ID, per-VMAC ACL/rate, per-leg rate isolation, write denial shape, COV routing, I-Am fan-out, replay served across the leg boundary, shared pending |
 | COV | Subscription install after ACK, rejected subscription not routed, cancellation, expiry, multi-client fan-out, unroutable confirmed notification |
-| Segments | Segmented responses and device requests relayed with per-invoke tracking; segmented writes denied |
+| Segments | Segmented responses and device requests relayed with per-invoke tracking; segmented writes denied; a real peer's multi-segment response is reassembled through the proxy (`make interop`) |
 | Lifecycle | Config validation, reload, restart-only warnings, invalid reload, shutdown, systemd readiness and watchdog; SC config validation and TLS file errors |
 | Independent peer | bacpypes3 0.0.110 drives the built binary as both client and device; BVLL-SC golden bytes come from the same peer; bacnet-stack 1.6.1's `sc-hub` + BSC clients drive the built binary over BACnet/SC (`make interop-sc`), including a COV subscriber |
 | Soak | Spoofed-source rate-limit flood; steady-state forwarding with flat goroutines/heap and zero unanswered requests |
@@ -106,7 +106,10 @@ gateway, and drives:
 6. an uncovered write still denied;
 7. a COV subscription that receives the initial notification and then the
    change from the client's own write, proving the device-originated
-   notification is routed back to the subscriber.
+   notification is routed back to the subscriber;
+8. a segmented response: the client advertises a 50-byte max APDU and reads a
+   120-byte description, so the proxy must relay every segment and the
+   SegmentACKs.
 
 `scripts/interop_client.py` and `scripts/interop_device.py` are real
 bacpypes3 applications, not protocol mocks. See

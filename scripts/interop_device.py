@@ -17,6 +17,11 @@ from bacpypes3.argparse import SimpleArgumentParser
 from bacpypes3.app import Application
 from bacpypes3.local.analog import AnalogValueObject
 
+# Longer than one 50-byte APDU, so a client that advertises a small
+# max-apdu-length forces the device to send a segmented ComplexACK. The proxy
+# must relay every segment and carry the client's SegmentACKs back.
+DESCRIPTION = "segmented " * 12
+
 
 class CovAnalogValueObject(AnalogValueObject):
     """An analog value that reports COV on a write, like a real device.
@@ -51,6 +56,7 @@ async def main() -> int:
             objectName="AV-1",
             presentValue=1.0,
             covIncrement=0.0,
+            description=DESCRIPTION,
         )
     )
     app.add_object(

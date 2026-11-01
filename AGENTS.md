@@ -197,7 +197,8 @@ file to re-read and the flags came from the command line.
   flat goroutines/heap and zero unanswered requests.
 - **Independent peer**: `make peers` provisions bacpypes3 0.0.110 in `.venv`;
   `make interop` drives the built binary on both IP legs, including a COV
-  subscription whose notification is triggered by a write. `make sc-hub-image`
+  subscription whose notification is triggered by a write and a segmented
+  response the client forces with a small max APDU. `make sc-hub-image`
   builds bacnet-stack 1.6.1's `sc-hub` + BSC clients in Docker; `make
   interop-sc` drives the built binary as a node of that hub, including a
   bacnet-stack COV subscriber. Exit 77 means the peer is absent, not that the
@@ -240,8 +241,9 @@ Done in v1:
   write denial with the tagged Error PDU, replay across the leg boundary, COV
   notification routing and I-Am fan-out.
 - bacpypes3 interop: read, Who-Is, denied write, SIGHUP reload to an allowed
-  write, uncovered write still denied, read-back of the written value, and a
-  COV subscription that receives the notification from the client's write.
+  write, uncovered write still denied, read-back of the written value, a COV
+  subscription that receives the notification from the client's write, and a
+  segmented response reassembled through the proxy.
 - bacnet-stack SC interop (`make interop-sc`): the proxy joins bacnet-stack
   1.6.1's `sc-hub` in Docker as a node, and bacnet-stack's own BSC clients
   drive Who-Is, a read, a denied write (tagged Error PDU over SC), a SIGHUP

@@ -7,10 +7,11 @@ and target come from the environment so SimpleArgumentParser's own arguments
 stay reserved for the local bind address:
 
     BACNET_TARGET   proxy address, e.g. 127.0.0.1:47811
-    BACNET_OP       read | write | write-denied | whois | cov
+    BACNET_OP       read | write | write-denied | whois | cov | read-long
     BACNET_OID      object identifier, default analog-value,1
     BACNET_PROP     property identifier, default present-value
     BACNET_VALUE    value for write/cov, default 2.5
+    BACNET_EXPECT   expected value for read, or length for read-long
 """
 
 import asyncio
@@ -27,7 +28,7 @@ from bacpypes3.apdu import (
 from bacpypes3.app import Application
 from bacpypes3.basetypes import ErrorClass, ErrorCode, PropertyIdentifier
 from bacpypes3.pdu import Address
-from bacpypes3.primitivedata import ObjectIdentifier, Real, TagList
+from bacpypes3.primitivedata import CharacterString, ObjectIdentifier, Real, TagList
 
 FAIL = 1
 
@@ -47,6 +48,12 @@ def _real(value) -> float:
     """
     inner = [t for t in value.tagList if t.tag_class == 0]
     return float(Real.decode(TagList(inner)))
+
+
+def _string(value) -> str:
+    """Unwrap a ReadProperty value into its character-string text."""
+    inner = [t for t in value.tagList if t.tag_class == 0]
+    return str(CharacterString.decode(TagList(inner)))
 
 
 async def _request(app: Application, req):
@@ -106,6 +113,27 @@ async def run(app: Application, target: Address) -> int:
                 "want class security (4) code writeAccessDenied (40)"
             )
         print(f"write denied: class={resp.errorClass} code={resp.errorCode}")
+        return 0
+
+    if op == "read-long":
+        # Advertise a small receive size so the device must segment its answer,
+        # then read a property larger than one APDU. The proxy has to relay
+        # every segment and carry the client's SegmentACKs back to the device;
+        # a proxy that only forwarded the first segment would never complete.
+        app.device_object.maxApduLengthAccepted = 50
+        req = ReadPropertyRequest(
+            objectIdentifier=oid,
+            propertyIdentifier=prop,
+            destination=target,
+        )
+        resp = await _request(app, req)
+        if isinstance(resp, ErrorRejectAbortNack):
+            return _fail(f"long read returned {resp!r}")
+        text = _string(resp.propertyValue)
+        want = int(os.environ.get("BACNET_EXPECT", "120"))
+        if len(text) != want:
+            return _fail(f"long read length {len(text)}, want {want}")
+        print(f"long read {oid} {prop} = {len(text)} chars across segments")
         return 0
 
     if op == "whois":

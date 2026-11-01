@@ -143,4 +143,7 @@ run_client cov analog-value,1 present-value "" 4.25 || fail "cov notification"
 echo "== read back the COV-changed value"
 run_client read analog-value,1 present-value 4.25 || fail "cov read-back"
 
+echo "== segmented response relayed through the proxy"
+run_client read-long analog-value,1 description 120 || fail "segmented read"
+
 echo "interop ok"

@@ -70,6 +70,7 @@ bacnet-stack BSC client that is a second node of the same hub:
 | Write allowed after reload | The write is acknowledged by the third-party device and the new value is read back |
 | Write still denied for an uncovered object | The allow rule covers exactly one target; a sibling object is still refused |
 | COV subscription and notification | A third-party client subscribes, changes the monitored value with a write, and receives the device's notification back through the proxy — proving subscriber routing, not broadcast, on the IP leg |
+| Segmented response | The client advertises a 50-byte max APDU and reads a 120-byte description, so the device's ComplexACK spans several segments; the reassembled value proves the proxy relayed every segment and carried the client's SegmentACKs back |
 
 The SC interop run repeats the IP-leg scenarios across the secure leg at the
 wire level:
@@ -184,11 +185,13 @@ the log line is the whole response.
 - **One peer only.** bacpypes3 is a current, specification-minded stack. A
   legacy controller may disagree with it; the response is to report the
   divergence here, not to normalize it inside the proxy.
-- **No segmented interop scenario yet.** Segmented responses and
-  device-initiated segmented requests are pinned by in-process tests, not by
-  the Python peer. Generating a genuinely segmented answer from a real
-  bacpypes3 device needs a payload large enough to force segmentation; that is
-  backlog work.
+- **Segmented responses are interop-covered; segmented requests are not.**
+  The Python client advertises a 50-byte max APDU and reads a 120-byte
+  description, so the real device answers with a multi-segment ComplexACK and
+  the proxy relays every segment and carries the client's SegmentACKs back.
+  Device-initiated segmented *requests* (a segmented confirmed COV/event
+  notification) are still pinned by in-process tests only; forcing one from the
+  peer needs the same payload trick in the other direction.
 - **COV interop is single-object and driver-triggered.** The Python client
   exercises `SubscribeCOV` and an unconfirmed notification, and the SC run
   drives `SubscribeCOV` through a bacnet-stack subscriber; multi-object
