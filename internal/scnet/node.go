@@ -191,11 +191,14 @@ func (n *Node) SendNPDU(dest sc.MAC, npdu []byte) error {
 	if dest.IsZero() {
 		return fmt.Errorf("sc: send to the zero vmac")
 	}
-	orig := n.cfg.VMAC
+	// The originating VMAC is deliberately absent: a node does not assert its
+	// own identity to the hub, and bacnet-stack's hub rejects an
+	// Encapsulated-NPDU that carries one ("'Originating Virtual Address'
+	// field must be absent"). The hub stamps the sender's VMAC on the way to
+	// the destination. Only the destination is set.
 	return n.send(sc.Header{
 		Function:  sc.FuncEncapsulatedNPDU,
 		MessageID: n.nextID(),
-		Orig:      &orig,
 		Dest:      &dest,
 		Payload:   npdu,
 	})
@@ -460,7 +463,28 @@ func (n *Node) handleFrame(conn *wsConn, hdr sc.Header) error {
 		_ = n.sendOn(conn, sc.Header{Function: sc.FuncDisconnectACK, MessageID: hdr.MessageID})
 		return errPeerDisconnected
 	case sc.FuncResult:
-		n.log.Debug("sc: received a Result", zap.Uint16("message_id", hdr.MessageID))
+		res, err := sc.DecodeResult(hdr.Payload)
+		if err != nil {
+			n.log.Debug("sc: received an undecodable Result",
+				zap.Uint16("message_id", hdr.MessageID), zap.Error(err))
+			break
+		}
+		if res.Code == sc.ResultNAK {
+			// The hub refused something this node sent. It is loud because
+			// the cause is almost always a frame the node must not send
+			// (a field the hub is meant to fill in), and silence would make
+			// it look like a one-way network fault.
+			n.log.Warn("sc: hub rejected a message",
+				zap.Uint16("message_id", hdr.MessageID),
+				zap.Uint8("for_function", uint8(res.Function)),
+				zap.Uint16("error_class", res.ErrorClass),
+				zap.Uint16("error_code", res.ErrorCode),
+				zap.String("details", res.Details))
+		} else {
+			n.log.Debug("sc: received a Result",
+				zap.Uint16("message_id", hdr.MessageID),
+				zap.Uint8("for_function", uint8(res.Function)))
+		}
 	case sc.FuncAddressResolution, sc.FuncAddressResolutionACK:
 		// The proxy is a hub client only and accepts no direct connections, so
 		// it has no WebSocket URI to advertise.

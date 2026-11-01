@@ -15,7 +15,7 @@ local `make` target.
 | COV | Subscription install after ACK, rejected subscription not routed, cancellation, expiry, multi-client fan-out, unroutable confirmed notification |
 | Segments | Segmented responses and device requests relayed with per-invoke tracking; segmented writes denied |
 | Lifecycle | Config validation, reload, restart-only warnings, invalid reload, shutdown, systemd readiness and watchdog; SC config validation and TLS file errors |
-| Independent peer | bacpypes3 0.0.110 drives the built binary as both client and device; BVLL-SC golden bytes come from the same peer |
+| Independent peer | bacpypes3 0.0.110 drives the built binary as both client and device; BVLL-SC golden bytes come from the same peer; bacnet-stack 1.6.1's `sc-hub` + BSC clients drive the built binary over BACnet/SC (`make interop-sc`) |
 | Soak | Spoofed-source rate-limit flood; steady-state forwarding with flat goroutines/heap and zero unanswered requests |
 
 ## Commands
@@ -25,14 +25,18 @@ make test        # gofmt gate + go test ./... -race -timeout 180s
 make verify      # build + race suite + vet
 make acceptance  # verify + bacpypes3 interop
 make interop     # built binary against bacpypes3 on both legs
+make interop-sc  # built binary over BACnet/SC against bacnet-stack's hub
 make soak        # opt-in long run; SOAK_DURATION=90s for a quick pass
 make security    # verify + staticcheck + govulncheck + SBOM vulnerability gate
 make peers       # provision .venv + bacpypes3 0.0.110 (exit 77 without Python)
+make sc-hub-image # build the bacnet-stack sc-hub Docker image (once)
 ```
 
 `make sbom` and `make vulnscan` are also available individually; they exit 77
 when `syft`/`grype` are not installed. `make interop` exits 77 when the peer is
-missing, so a bare machine stays green. A release run treats both as failures.
+missing and `make interop-sc` exits 77 when Docker, the `sc-hub` image or
+bacpypes3 is missing, so a bare machine stays green. A release run treats both
+as failures.
 
 ## Security regressions pinned explicitly
 
@@ -97,6 +101,26 @@ gateway, and drives:
 `scripts/interop_client.py` and `scripts/interop_device.py` are real
 bacpypes3 applications, not protocol mocks. See
 [CONFORMANCE.md](CONFORMANCE.md) for what this found.
+
+### Independent SC peer
+
+The secure front leg has its own independent peer. `scripts/sc-hub/Dockerfile`
+builds bacnet-stack 1.6.1's hub (`bacschub`) and BSC clients (`bacwi`, `bacrp`,
+`bacwp`) on libwebsockets; `make sc-hub-image` builds it once.
+`scripts/interop-sc.sh` then:
+
+1. generates a small PKI with SAN `127.0.0.1` (`scripts/sc-certs.sh`), so the
+   Go node's real TLS 1.3 verification is exercised;
+2. starts a bacpypes3 device on the clear leg;
+3. starts the bacnet-stack hub in Docker and the built gateway as a node of it;
+4. drives a Who-Is, a read, a denied write, a `SIGHUP` reload, an allowed write,
+   an uncovered sibling write and a read-back over BACnet/SC with a
+   bacnet-stack client that is a second node of the same hub.
+
+This is the one run where the SC transport (which this project owns) talks to a
+third-party implementation. It found the originating-VMAC defect recorded in
+[CONFORMANCE.md](CONFORMANCE.md); do not run it concurrently with another
+interop run — host port `50050` and the `127.0.0.1:4781x` ports collide.
 
 ## Remaining hardware boundary
 

@@ -5,7 +5,7 @@
 BINARY := bacnet-shield
 GO     ?= go
 
-.PHONY: all build test fmt-check vet staticcheck govulncheck race verify acceptance security peers interop soak release release-all sbom vulnscan clean
+.PHONY: all build test fmt-check vet staticcheck govulncheck race verify acceptance security peers interop interop-sc sc-hub-image soak release release-all sbom vulnscan clean
 
 all: build
 
@@ -56,6 +56,20 @@ peers:
 # missing (run `make peers`).
 interop: build
 	sh scripts/interop-bacnet.sh
+
+# sc-hub-image builds the third-party BACnet/SC peer used by interop-sc:
+# bacnet-stack 1.6.1's hub and client tools on top of libwebsockets. It is
+# cached by Docker, so it is a one-time cost per machine.
+sc-hub-image:
+	docker build -t bacnet-shield/sc-hub scripts/sc-hub
+
+# interop-sc drives the built gateway over BACnet/SC against an independent
+# hub AND an independent client (both bacnet-stack), with a bacpypes3 device
+# on the clear leg. It proves the SC transport this project owns against a
+# third-party implementation. Exit 77 when Docker, the image or bacpypes3 is
+# missing (run `make sc-hub-image` and `make peers`).
+interop-sc: build
+	sh scripts/interop-sc.sh
 
 # soak runs the long tests a green `make test` cannot judge: continuous load
 # (goroutines and live heap must stay flat) and the rate limiter under a flood

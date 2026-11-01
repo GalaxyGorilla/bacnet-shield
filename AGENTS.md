@@ -129,6 +129,11 @@ scripts/               bacpypes3 peer provisioning and interop drivers
 - An SC node drops an `Encapsulated-NPDU` whose destination is a different
   VMAC and one with no (or a zero) origin VMAC, even though the hub should
   have routed it. Pinned by `TestNodeFiltersInboundNPDUs`.
+- An SC node sending an `Encapsulated-NPDU` sets **only** the destination
+  VMAC. Setting its own originating VMAC is an identity it must not assert:
+  bacnet-stack's hub NAKs it (`'Originating Virtual Address' field must be
+  absent`). Pinned by `TestNodeConnectsSendsAndReceives` (the fake hub now
+  enforces the rule) and by `make interop-sc`.
 - SC peer state is keyed by `sc:<vmac>`; two SC nodes using invoke ID 7 at the
   same time must each get their own answer. Pinned by
   `TestGatewaySCMultiClientInvokeIDs`.
@@ -187,10 +192,13 @@ file to re-read and the flags came from the command line.
   `BACNET_SHIELD_SOAK_DURATION` (default 10m). They assert bounded tables,
   flat goroutines/heap and zero unanswered requests.
 - **Independent peer**: `make peers` provisions bacpypes3 0.0.110 in `.venv`;
-  `make interop` drives the built binary on both legs. Exit 77 means the peer
-  is absent, not that the product failed.
+  `make interop` drives the built binary on both IP legs. `make sc-hub-image`
+  builds bacnet-stack 1.6.1's `sc-hub` + BSC clients in Docker; `make
+  interop-sc` drives the built binary as a node of that hub. Exit 77 means the
+  peer is absent, not that the product failed.
 - Do not run two full test suites concurrently; fixed ports in the interop
-  script will collide and look like a product bind error.
+  scripts will collide and look like a product bind error (`interop-sc` also
+  binds host port 50050).
 
 ## 6. Current state
 
@@ -223,18 +231,21 @@ Done in v1:
   I-Am fan-out.
 - bacpypes3 interop: read, Who-Is, denied write, SIGHUP reload to an allowed
   write, uncovered write still denied, read-back of the written value.
+- bacnet-stack SC interop (`make interop-sc`): the proxy joins bacnet-stack
+  1.6.1's `sc-hub` in Docker as a node, and bacnet-stack's own BSC clients
+  drive Who-Is, a read, a denied write (tagged Error PDU over SC), a SIGHUP
+  reload to a scoped policy, an allowed write and a read-back. This found the
+  originating-VMAC defect recorded in `CONFORMANCE.md`.
 
 Known boundaries:
 
 - No physical-device commissioning yet (see README).
-- No independent SC-peer interop yet: the remaining B1 step is bacnet-stack's
-  `sc-hub` via Docker. The SC leg is pinned by the in-process TLS hub and the
-  data-plane tests, not yet by a third-party hub.
 - SC admission is VMAC-only. UUID-keyed admission needs Address-Resolution,
   which the node does not implement; `access.sc_allow` rejects a UUID entry
   rather than pretending to enforce it.
 - No SC hub role and no SC direct (node-to-node) connections; the proxy is
   always a WebSocket client of a hub.
+- No SC connection-state metric yet; a hub outage is visible in the log only.
 - No BBMD/router; one device per instance.
 - Segmented writes are refused; SubscribeCOVPropertyMultiple is refused.
 - The proxy does not reassemble segmented payloads; it tracks and relays them.

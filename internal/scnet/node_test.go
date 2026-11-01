@@ -169,6 +169,16 @@ func (h *testHub) serveConn(raw net.Conn) {
 			_ = hc.send(sc.Header{Function: sc.FuncDisconnectACK, MessageID: frame.MessageID})
 			return
 		case sc.FuncEncapsulatedNPDU:
+			// A hub learns who sent a frame from the connection, so a node
+			// must not assert its own originating VMAC; bacnet-stack's hub
+			// NAKs such a frame ("'Originating Virtual Address' field must
+			// be absent"). Enforce the same rule here so a regression fails
+			// locally instead of only against the Docker interop hub.
+			if frame.Orig != nil {
+				_ = hc.send(sc.Header{Function: sc.FuncResult, MessageID: frame.MessageID,
+					Payload: mustResultNAK(sc.FuncEncapsulatedNPDU)})
+				continue
+			}
 			select {
 			case h.npdus <- hubNPDU{orig: frame.Orig, dest: frame.Dest, data: frame.Payload}:
 			default:
@@ -263,15 +273,17 @@ func TestNodeConnectsSendsAndReceives(t *testing.T) {
 	hc := h.waitConn(t, 3*time.Second)
 	waitConnected(t, n, 3*time.Second)
 
-	// Node -> hub.
+	// Node -> hub. The originating VMAC must be absent: the hub stamps it
+	// from the connection, and bacnet-stack's hub rejects a node that sets
+	// it. Only the destination travels with the frame.
 	dest := sc.MAC{0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F}
 	if err := n.SendNPDU(dest, []byte{1, 4, 0, 5, 1}); err != nil {
 		t.Fatalf("SendNPDU: %v", err)
 	}
 	select {
 	case got := <-h.npdus:
-		if got.orig == nil || *got.orig != n.VMAC() {
-			t.Fatalf("orig = %v, want %v", got.orig, n.VMAC())
+		if got.orig != nil {
+			t.Fatalf("orig = %v, want absent (the hub adds it)", got.orig)
 		}
 		if got.dest == nil || *got.dest != dest {
 			t.Fatalf("dest = %v, want %v", got.dest, dest)

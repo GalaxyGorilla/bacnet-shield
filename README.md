@@ -6,10 +6,9 @@ shielding work between it and the building's clients.
 
 **Status:** the documented v1 data plane is complete, and the BACnet/SC secure
 front leg now shares it. The protocol codecs are fuzzed, the data plane is
-race-tested, and an independent stack (bacpypes3) drives reads, writes, COV
-routing and policy denials through the built binary. The SC leg has been driven
-against an in-process TLS hub; an interop run against bacnet-stack's `sc-hub`
-is the remaining B1 step. Physical device commissioning is still required; see
+race-tested, and independent stacks drive the built binary on both legs:
+bacpypes3 for BACnet/IP, and bacnet-stack's own `sc-hub` plus BSC clients for
+BACnet/SC. Physical device commissioning is still required; see
 [Production readiness](#production-readiness).
 
 ```
@@ -317,25 +316,28 @@ make acceptance  # verify + independent bacpypes3 peer
 make soak        # long-running leak and spoofed-source floods (opt-in)
 make security    # verify + staticcheck + govulncheck + SBOM scan
 make interop     # built binary against bacpypes3 on both legs
+make interop-sc  # built binary over BACnet/SC against bacnet-stack's hub
 ```
 
-The interop suite needs the peer provisioned once:
+The interop suites need their peers provisioned once:
 
 ```bash
-make peers       # creates .venv and installs bacpypes3 0.0.110
+make peers         # creates .venv and installs bacpypes3 0.0.110
+make sc-hub-image  # builds bacnet-stack 1.6.1's sc-hub in Docker
 ```
 
-It exits 77 when Python or the peer is missing, so a bare machine stays green;
-a release run treats that as a failure. See [TESTING.md](TESTING.md) for the
-layers and [CONFORMANCE.md](CONFORMANCE.md) for what the independent stack
+Each exits 77 when its peer is missing, so a bare machine stays green; a
+release run treats that as a failure. See [TESTING.md](TESTING.md) for the
+layers and [CONFORMANCE.md](CONFORMANCE.md) for what the independent stacks
 found.
 
 The SC leg is covered by the same races: the BVLL-SC codec is golden-byte
 cross-checked against bacpypes3, the WebSocket parser is fuzzed, and the node is
 driven against a real in-process TLS hub (connect, heartbeat, reconnect,
 destination filtering). Proxy tests then drive two SC nodes with the same invoke
-ID through the shared data plane. The independent bacnet-stack `sc-hub` run is
-the remaining B1 interop step.
+ID through the shared data plane. `make interop-sc` runs the proxy as a node of
+bacnet-stack's own `sc-hub` and drives it with bacnet-stack's BSC clients, so
+the SC transport is also proven against a third-party implementation.
 
 ## Documentation
 

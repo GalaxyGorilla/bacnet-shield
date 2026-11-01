@@ -45,13 +45,14 @@ Done:
   reloadable `access.sc_allow` VMAC allow-list (empty = accept what the hub
   delivers). Tests cover two SC clients with the same invoke ID, per-VMAC ACL
   and rate, denial shape, COV and I-Am fan-out.
+- Independent-peer interop: `make interop-sc` runs the proxy as a node of
+  bacnet-stack 1.6.1's hub (Docker) and drives it with bacnet-stack's own BSC
+  clients — Who-Is, ReadProperty, a denied write with the tagged Error PDU,
+  `SIGHUP` reload, an allowed write and read-back. See
+  [CONFORMANCE.md](CONFORMANCE.md).
 
 Remaining:
 
-- An independent-peer interop run: bacnet-stack's `sc-hub` via Docker, plus an
-  SC client that drives a read, a denied write and a COV subscription through
-  the proxy. Until that runs, the SC leg is pinned by the in-process TLS hub
-  and data-plane tests, not a third-party implementation.
 - SC connection-state observability (a connected/hub-status gauge) if an
   appliance dashboard needs it; today a hub outage is visible only in the log.
 - UUID-keyed admission. The BVLL-SC data path carries the sender's VMAC but

@@ -13,11 +13,20 @@ and what cannot be verified on this host.
 | Peer | Stack | Version | Provisioning |
 |---|---|---|---|
 | `bacpypes3` | pure Python BACnet stack | 0.0.110 | `make peers` (creates `.venv`) |
+| `bacnet-stack` `sc-hub` | C BACnet stack (hub + BSC clients) | 1.6.1 | `make sc-hub-image` (Docker) |
 
 `scripts/peers-setup.sh` exits 77 when no Python is available, so a bare
 machine can run `make test` without the peer. `make interop` and
 `make acceptance` treat a missing peer as a failure, not a skip: a green
 acceptance run must have actually used the independent stack.
+
+The SC peer is bacnet-stack's own hub and client tools, built from source into
+a Docker image (`scripts/sc-hub/Dockerfile`) on libwebsockets. The proxy is a
+**node** of that hub, and a bacnet-stack client (`bacwi`, `bacrp`, `bacwp`) is
+the node on the other side, so the SC transport is exercised against a
+third-party implementation instead of our in-process TLS fake. That image is
+one-time cached by Docker; `make interop-sc` exits 77 when Docker, the image or
+bacpypes3 is missing.
 
 The peer applications are real `bacpypes3` applications:
 
@@ -35,6 +44,19 @@ The peer applications are real `bacpypes3` applications:
 [bacpypes3 client] --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [bacpypes3 device]
 ```
 
+`scripts/interop-sc.sh` is the secure-front-leg counterpart. It generates a
+small PKI (SAN `127.0.0.1`, so the Go node's real TLS 1.3 verification is what
+gets exercised), starts the bacnet-stack hub in Docker, starts the proxy with
+an `sc:` block as a node of that hub, and drives every request with a
+bacnet-stack BSC client that is a second node of the same hub:
+
+```
+[bacnet-stack client] --BACnet/SC--> [bacnet-stack sc-hub] <--BACnet/SC-- [bacnet-shield]
+                                                                                |
+                                                                       BACnet/IP v
+                                                               [bacpypes3 device]
+```
+
 ## Covered today
 
 | Scenario | What it proves |
@@ -45,6 +67,18 @@ The peer applications are real `bacpypes3` applications:
 | `SIGHUP` policy reload | A real client observes the policy change in place; the gateway does not restart |
 | Write allowed after reload | The write is acknowledged by the third-party device and the new value is read back |
 | Write still denied for an uncovered object | The allow rule covers exactly one target; a sibling object is still refused |
+
+The SC interop run repeats the IP-leg scenarios across the secure leg at the
+wire level:
+
+| Scenario (over BACnet/SC) | What it proves |
+|---|---|
+| Connect-Request / Connect-Accept through a real hub | The node handshake is accepted by a third-party hub, including TLS 1.3 and the `hub.bsc.bacnet.org` subprotocol |
+| Who-Is reached over SC | An SC client's broadcast NPDU is delivered to the one device as unicast and the I-Am is routed back through the hub to the requesting VMAC |
+| ReadProperty over SC | The forward path, invoke-ID translation and the clear-leg read all work when the front leg is SC |
+| Write refused by `read_only` | The bacnet-stack client prints `security: write-access-denied`, proving the tagged Error PDU survives the SC leg and is decoded by a third-party stack |
+| `SIGHUP` reload to a scoped policy | The policy swap happens without dropping the hub connection |
+| Write allowed after reload, sibling still denied, read-back | The scoped rule covers exactly its target and the value round-trips |
 
 Wire formats were cross-checked against the bacpypes3 source for the parts
 the proxy parses or emits: BVLC functions and length semantics, NPDU control
@@ -60,8 +94,8 @@ Connect-Request/Accept, Disconnect-Request/ACK, Heartbeat-Request/ACK,
 Proprietary) and the header/option combinations the proxy emits.
 `internal/bacnet/sc/sc_test.go` pins those bytes and was cross-checked against
 bacnet-stack's `src/bacnet/datalink/bsc/bvlc-sc.c`. The transport and node
-state machine are **not** covered by this oracle yet; that is the Docker
-`sc-hub` interop step.
+state machine are pinned against a real in-process TLS 1.3 hub **and** against
+bacnet-stack's own hub in `scripts/interop-sc.sh`; see Finding 3.
 
 ## Findings
 
@@ -95,6 +129,42 @@ find: our own decoder happily round-tripped the same wrong bytes.
 No vendor divergence was adapted away in the proxy. Service payloads remain
 opaque; the proxy never rewrites a value to satisfy a peer.
 
+### 3. A node must not set its own originating VMAC
+
+The first SC interop run completed the Connect handshake against the real hub
+and delivered the client's Who-Is to the proxy, but the proxy's I-Am never came
+back and the client listed zero devices. The proxy log showed the hub answering
+with a `BVLC-Result` NAK, which we decoded for the first time:
+
+```
+hub rejected a message  for_function=0  error_class=1792  error_code=37120
+                        details="'Originating Virtual Address' field must be absent"
+```
+
+The cause was ours. `Node.SendNPDU` set both the originating and the
+destination VMAC on an outbound `Encapsulated-NPDU`. That is a node asserting
+its own identity, which the hub is supposed to infer from the WebSocket
+connection; bacnet-stack's hub (and the spec, EA-001) reject a frame that
+carries it. The fix is to send **only** the destination VMAC and let the hub
+stamp the sender on the way to the recipient.
+
+Fixed in `internal/scnet/node.go` and pinned twice: the in-process test hub
+(`internal/scnet/node_test.go`) now NAKs a frame with an origin, and
+`TestNodeConnectsSendsAndReceives` asserts the origin is **absent**; the Docker
+run proves the same rule against the third-party hub. This is the class of bug
+that only a real peer finds: our own fake hub had been rewritten to *expect*
+the origin, so the Go suite was green on the wrong behavior.
+
+### 4. A BVLC-Result NAK from the hub is worth surfacing
+
+Not a divergence, but a deliberate product change the interop forced: a
+`BVLC-Result` NAK from the hub is now logged at `warn` with the function it
+refuses, the error class/code and the UTF-8 details string. Before this, a NAK
+was a `debug` line, so a hub rejecting every frame looked like a one-way
+network fault (requests in, nothing out) rather than a protocol complaint.
+There is nothing for the node to retry with — the message was malformed — so
+the log line is the whole response.
+
 ## Deliberate limits of this layer
 
 - **One peer only.** bacpypes3 is a current, specification-minded stack. A
@@ -108,10 +178,8 @@ opaque; the proxy never rewrites a value to satisfy a peer.
 - **No COV interop scenario yet.** COV subscription, cancellation, expiry and
   fan-out are pinned by in-process tests. The Python device could originate
   notifications, but the current interop driver does not exercise them.
-- **No BACnet/SC transport interop yet.** The BVLL-SC codec is golden-byte
-  cross-checked against bacpypes3 and bacnet-stack, and the node is tested
-  against an in-process TLS 1.3 hub. A run against an independent hub
-  (bacnet-stack `sc-hub` via Docker) is the remaining B1 step; see
+- **No BACnet/SC direct (node-to-node) interop.** The proxy attaches to a hub,
+  which is the v1 shape. Direct connections are out of scope; see
   [BACKLOG.md](BACKLOG.md).
 - **No BBMD, foreign-device registration or IPv6.** These are outside the v1
   scope; see [BACKLOG.md](BACKLOG.md).
@@ -121,10 +189,14 @@ opaque; the proxy never rewrites a value to satisfy a peer.
 ## Rerun
 
 ```bash
-make peers       # once: .venv + bacpypes3 0.0.110
-make interop     # builds the binary and runs the scenarios above
+make peers          # once: .venv + bacpypes3 0.0.110
+make interop        # builds the binary and runs the BACnet/IP scenarios
+make sc-hub-image   # once: bacnet-stack 1.6.1 sc-hub + client tools in Docker
+make interop-sc     # builds the binary and runs the BACnet/SC scenarios
+make acceptance     # verify + interop
 ```
 
-The script uses `127.0.0.1:47810` for the device and `127.0.0.1:47811` for
-the proxy. Do not run it concurrently with another interop run or another
-full test suite; the fixed ports collide.
+The scripts use `127.0.0.1:47810` for the device and `127.0.0.1:47811` for
+the proxy; `interop-sc` also binds host port `50050` for the hub. Do not run
+them concurrently with another interop run or another full test suite; the
+fixed ports collide.
