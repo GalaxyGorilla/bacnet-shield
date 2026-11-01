@@ -85,6 +85,20 @@ wait_for() {
 	return 1
 }
 
+wait_for_count() {
+	# wait_for_count <file> <text> <min-count> <tenths>
+	i=0
+	while [ "$i" -lt "$4" ]; do
+		n="$(grep -c "$2" "$1" 2>/dev/null || true)"
+		if [ "${n:-0}" -ge "$3" ]; then
+			return 0
+		fi
+		sleep 0.1
+		i=$((i + 1))
+	done
+	return 1
+}
+
 # bsc runs one bacnet-stack client tool inside the hub container. The container
 # carries the tools, and the client is another SC node of the same hub.
 bsc() {
@@ -181,6 +195,10 @@ echo "== read analog-value:1 present-value over SC"
 read_out="$(bsc bacrp 1001 analog-value 1 present-value)" || fail "bacrp failed"
 echo "$read_out" | grep -q "1.000000" || fail "read value wrong (got: $read_out)"
 
+echo "== device errors relay opaquely over SC (unknown object)"
+err_out="$(bsc bacrp 1001 analog-value 99 present-value || true)"
+echo "$err_out" | grep -q "unknown-object" || fail "device error not relayed (got: $err_out)"
+
 echo "== write refused by the read-only policy"
 write_out="$(bsc bacwp 1001 analog-value 1 present-value 0 -1 4 3.5 || true)"
 echo "$write_out" | grep -q "write-access-denied" || fail "write denial not seen (got: $write_out)"
@@ -201,5 +219,13 @@ echo "$write2" | grep -q "write-access-denied" || fail "uncovered write not deni
 echo "== read back the written value over SC"
 read_back="$(bsc bacrp 1001 analog-value 1 present-value)" || fail "read-back failed"
 echo "$read_back" | grep -q "3.500000" || fail "read-back value wrong (got: $read_back)"
+
+echo "== hub restart: the node re-attaches and keeps serving"
+attached_before="$(grep -c 'attached to hub' "$gw_log" || true)"
+docker restart "$HUB_NAME" >/dev/null || fail "hub did not restart"
+wait_for_count "$gw_log" "attached to hub" "$((attached_before + 1))" 300 ||
+	fail "node did not re-attach to the hub after it restarted"
+after="$(bsc bacrp 1001 analog-value 1 present-value)" || fail "read after hub restart failed"
+echo "$after" | grep -q "3.500000" || fail "value changed across a hub restart (got: $after)"
 
 echo "interop-sc ok"

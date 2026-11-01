@@ -7,11 +7,11 @@ local `make` target.
 | Layer | Evidence |
 |---|---|
 | Codecs | BVLC, NPDU, APDU, tags, object IDs and write targets; malformed, truncated, extended-tag and segmented vectors |
-| Fuzzing | Eight native targets: `FuzzParseBVLC`, `FuzzParseNPDU`, `FuzzParseAPDU`, `FuzzParseObjectID`, `FuzzWriteTargets`, `FuzzTagReader`, `FuzzParse` (BVLL-SC) and `FuzzParseFrame` (WebSocket) |
+| Fuzzing | Nine native targets: `FuzzParseBVLC`, `FuzzParseNPDU`, `FuzzParseAPDU`, `FuzzParseObjectID`, `FuzzWriteTargets`, `FuzzTagReader`, `FuzzParse` and `FuzzDecodeMessage` (BVLL-SC), and `FuzzParseFrame` (WebSocket) |
 | Policy | Allow-list, per-client rate limit, read-only, scoped write rules, deny-overrides, allow-must-cover, service-level writes; SC VMAC allow-list and per-VMAC bucket |
 | Data plane | Real loopback UDP sockets, invoke-ID collision and reuse, retransmission dedupe, pending cap/expiry, routing strip, device source validation |
-| SC transport | Real in-process TLS 1.3 hub: connect handshake, heartbeat, reconnect/failover, hostname verification, destination/origin filtering |
-| SC data plane | In-memory SC leg: two clients with the same invoke ID, per-VMAC ACL/rate, write denial shape, COV routing, I-Am fan-out, shared replay/pending |
+| SC transport | Real in-process TLS 1.3 hub: connect handshake, heartbeat and heartbeat *timeout* (a hub that stops ACKing is dropped), reconnect and failover across a hub list, hostname verification, destination/origin filtering, and survival of a malformed frame and a non-binary WebSocket message |
+| SC data plane | In-memory SC leg: two clients with the same invoke ID, an IP and an SC client sharing an invoke ID, per-VMAC ACL/rate, per-leg rate isolation, write denial shape, COV routing, I-Am fan-out, replay served across the leg boundary, shared pending |
 | COV | Subscription install after ACK, rejected subscription not routed, cancellation, expiry, multi-client fan-out, unroutable confirmed notification |
 | Segments | Segmented responses and device requests relayed with per-invoke tracking; segmented writes denied |
 | Lifecycle | Config validation, reload, restart-only warnings, invalid reload, shutdown, systemd readiness and watchdog; SC config validation and TLS file errors |
@@ -65,6 +65,13 @@ as failures.
   cannot spend another VMAC's rate tokens.
 - A denied SC write gets the same tagged Error PDU as the IP leg, and the
   device never sees it.
+- An IP client and an SC node using the same invoke ID at the same time each
+  get their own answer; draining one leg's rate bucket does not spend the
+  other's token.
+- A hub that stops acknowledging heartbeats is dropped and re-attached, and an
+  unreachable first hub makes the node fail over to the next one.
+- A malformed or non-binary WebSocket message from the hub costs the
+  connection, not the process, and does not desync the node.
 - An invalid reload keeps the running policy.
 - A bind failure exits without advertising systemd readiness.
 
@@ -113,9 +120,12 @@ builds bacnet-stack 1.6.1's hub (`bacschub`) and BSC clients (`bacwi`, `bacrp`,
    Go node's real TLS 1.3 verification is exercised;
 2. starts a bacpypes3 device on the clear leg;
 3. starts the bacnet-stack hub in Docker and the built gateway as a node of it;
-4. drives a Who-Is, a read, a denied write, a `SIGHUP` reload, an allowed write,
-   an uncovered sibling write and a read-back over BACnet/SC with a
-   bacnet-stack client that is a second node of the same hub.
+4. drives a Who-Is, a read, a device error (unknown object) relayed opaquely,
+   a denied write, a `SIGHUP` reload, an allowed write, an uncovered sibling
+   write and a read-back over BACnet/SC with a bacnet-stack client that is a
+   second node of the same hub;
+5. restarts the hub container and checks the node re-attaches and keeps
+   serving.
 
 This is the one run where the SC transport (which this project owns) talks to a
 third-party implementation. It found the originating-VMAC defect recorded in

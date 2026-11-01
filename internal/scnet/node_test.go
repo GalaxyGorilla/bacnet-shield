@@ -70,6 +70,10 @@ type testHub struct {
 	connects int
 	hearts   int
 
+	// dropHeartbeats makes the hub stop acknowledging Heartbeat-Requests, so
+	// a test can drive the node's "heartbeat not acknowledged" path.
+	dropHeartbeats bool
+
 	npdus chan hubNPDU
 }
 
@@ -163,7 +167,11 @@ func (h *testHub) serveConn(raw net.Conn) {
 		case sc.FuncHeartbeatRequest:
 			h.mu.Lock()
 			h.hearts++
+			drop := h.dropHeartbeats
 			h.mu.Unlock()
+			if drop {
+				continue
+			}
 			_ = hc.send(sc.Header{Function: sc.FuncHeartbeatACK, MessageID: frame.MessageID})
 		case sc.FuncDisconnectRequest:
 			_ = hc.send(sc.Header{Function: sc.FuncDisconnectACK, MessageID: frame.MessageID})
@@ -225,6 +233,13 @@ func (h *testHub) count() (connects, hearts int) {
 	return h.connects, h.hearts
 }
 
+// setDropHeartbeats controls whether the hub acknowledges Heartbeat-Requests.
+func (h *testHub) setDropHeartbeats(v bool) {
+	h.mu.Lock()
+	h.dropHeartbeats = v
+	h.mu.Unlock()
+}
+
 func mustResultNAK(fn sc.Function) []byte {
 	p, _ := sc.Result{Function: fn, Code: sc.ResultNAK, ErrorClass: 1, ErrorCode: 1, Details: "no"}.Encode()
 	return p
@@ -243,8 +258,12 @@ func testNode(t *testing.T, h *testHub, cfg NodeConfig) *Node {
 	cfg.Hubs = []string{h.url}
 	cfg.TLS = &tls.Config{RootCAs: h.pool}
 	cfg.DialTimeout = 3 * time.Second
-	cfg.HeartbeatInterval = 100 * time.Millisecond
-	cfg.HeartbeatTimeout = time.Second
+	if cfg.HeartbeatInterval == 0 {
+		cfg.HeartbeatInterval = 100 * time.Millisecond
+	}
+	if cfg.HeartbeatTimeout == 0 {
+		cfg.HeartbeatTimeout = time.Second
+	}
 	cfg.ReconnectMin = 20 * time.Millisecond
 	cfg.ReconnectMax = 100 * time.Millisecond
 	if cfg.MaxMessage == 0 {
@@ -530,4 +549,139 @@ func waitConnected(t *testing.T, n *Node, timeout time.Duration) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("node never reported connected")
+}
+
+// waitConnects waits until the hub has accepted at least n node connections.
+func waitConnects(t *testing.T, h *testHub, n int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if connects, _ := h.count(); connects >= n {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	connects, _ := h.count()
+	t.Fatalf("hub saw %d connections, want at least %d", connects, n)
+}
+
+// TestNodeHeartbeatTimeoutReconnects proves a hub that stops acknowledging
+// heartbeats is treated as dead: the node gives up the connection and attaches
+// again rather than sitting on a black hole. This is the failure half of
+// TestNodeHeartbeats, which only proves the happy path.
+func TestNodeHeartbeatTimeoutReconnects(t *testing.T) {
+	h := newTestHub(t)
+	h.setDropHeartbeats(true)
+	n := testNode(t, h, NodeConfig{
+		HeartbeatInterval: 60 * time.Millisecond,
+		HeartbeatTimeout:  80 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = n.Run(ctx) }()
+
+	h.waitConn(t, 3*time.Second)
+	waitConnected(t, n, 3*time.Second)
+	waitConnects(t, h, 2, 4*time.Second)
+}
+
+// TestNodeSurvivesMalformedFrame proves a junk frame from the network costs
+// one frame, not the connection: the node logs and continues, and the next
+// good Encapsulated-NPDU is still delivered.
+func TestNodeSurvivesMalformedFrame(t *testing.T) {
+	h := newTestHub(t)
+	n := testNode(t, h, NodeConfig{})
+
+	received := make(chan hubNPDU, 4)
+	n.SetNPDUHandler(func(orig *sc.MAC, npdu []byte) {
+		received <- hubNPDU{orig: orig, data: append([]byte(nil), npdu...)}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = n.Run(ctx) }()
+
+	hc := h.waitConn(t, 3*time.Second)
+	waitConnected(t, n, 3*time.Second)
+
+	// A binary frame that is not a valid BVLL-SC message (unknown function).
+	if err := hc.c.WriteBinary([]byte{0xFF, 0x00, 0x00, 0x00}); err != nil {
+		t.Fatalf("inject malformed frame: %v", err)
+	}
+
+	client := sc.MAC{0x02, 0x00, 0x00, 0x00, 0x00, 0x20}
+	dest := n.VMAC()
+	h.send(hc, sc.Header{Function: sc.FuncEncapsulatedNPDU, MessageID: 0x70,
+		Orig: &client, Dest: &dest, Payload: []byte{1, 4, 0, 5, 1}})
+
+	select {
+	case got := <-received:
+		if got.orig == nil || *got.orig != client {
+			t.Fatalf("orig = %v, want %v", got.orig, client)
+		}
+		if string(got.data) != string([]byte{1, 4, 0, 5, 1}) {
+			t.Fatalf("payload = %x", got.data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("node dropped the connection after a malformed frame")
+	}
+	if !n.Connected() {
+		t.Fatal("node is no longer connected after a malformed frame")
+	}
+}
+
+// TestNodeRejectsNonBinaryMessage proves a text (or other non-binary) WebSocket
+// message is a protocol violation that ends the connection, not something the
+// node tries to parse as a BVLL-SC frame.
+func TestNodeRejectsNonBinaryMessage(t *testing.T) {
+	h := newTestHub(t)
+	n := testNode(t, h, NodeConfig{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = n.Run(ctx) }()
+
+	hc := h.waitConn(t, 3*time.Second)
+	waitConnected(t, n, 3*time.Second)
+
+	if err := hc.c.writeFrame(opText, []byte("not a bacnet frame")); err != nil {
+		t.Fatalf("inject text frame: %v", err)
+	}
+
+	// The node must drop the connection and reconnect, exactly as after any
+	// other connection-level fault.
+	waitConnects(t, h, 2, 4*time.Second)
+}
+
+// TestNodeFailsOverToSecondHub proves the node list is a real failover list,
+// not decoration: when the first hub refuses the connection the node advances
+// to the next one and attaches there.
+func TestNodeFailsOverToSecondHub(t *testing.T) {
+	down := newTestHub(t)
+	up := newTestHub(t)
+	_ = down.ln.Close() // the first hub is unreachable
+
+	cfg := NodeConfig{
+		VMAC:              sc.MAC{0x00, 0x11, 0x22, 0x33, 0x44, 0x66},
+		UUID:              sc.UUID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17},
+		Hubs:              []string{down.url, up.url},
+		TLS:               &tls.Config{RootCAs: up.pool},
+		DialTimeout:       time.Second,
+		HeartbeatInterval: 100 * time.Millisecond,
+		HeartbeatTimeout:  time.Second,
+		ReconnectMin:      20 * time.Millisecond,
+		ReconnectMax:      100 * time.Millisecond,
+	}
+	n, err := NewNode(cfg, zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = n.Run(ctx) }()
+
+	up.waitConn(t, 5*time.Second)
+	waitConnected(t, n, 5*time.Second)
 }

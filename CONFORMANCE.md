@@ -77,8 +77,10 @@ wire level:
 | Who-Is reached over SC | An SC client's broadcast NPDU is delivered to the one device as unicast and the I-Am is routed back through the hub to the requesting VMAC |
 | ReadProperty over SC | The forward path, invoke-ID translation and the clear-leg read all work when the front leg is SC |
 | Write refused by `read_only` | The bacnet-stack client prints `security: write-access-denied`, proving the tagged Error PDU survives the SC leg and is decoded by a third-party stack |
+| Device error relayed over SC | A read of an absent object returns the device's own `object: unknown-object` error through the SC leg, so device errors pass opaquely and are not turned into a proxy denial |
 | `SIGHUP` reload to a scoped policy | The policy swap happens without dropping the hub connection |
 | Write allowed after reload, sibling still denied, read-back | The scoped rule covers exactly its target and the value round-trips |
+| Hub restart | The node detects the lost connection, re-attaches to the hub, and serves the next request; the device value is unchanged across the restart |
 
 Wire formats were cross-checked against the bacpypes3 source for the parts
 the proxy parses or emits: BVLC functions and length semantics, NPDU control

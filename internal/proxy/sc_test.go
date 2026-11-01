@@ -376,3 +376,144 @@ func TestGatewaySCCovNotificationRoutesToSubscriber(t *testing.T) {
 	}
 	leg.expectNoMore(t, 2, 200*time.Millisecond)
 }
+
+// TestGatewayMixedIPAndSCSameInvokeID is the cross-leg counterpart of the
+// per-leg collision tests: an IP client and an SC client use the same invoke
+// ID at the same time, and each must get exactly its own answer. It is the
+// direct test of the front-leg abstraction's central claim -- the pending
+// table and replay cache are keyed by peer identity, so a `ip:port` key and an
+// `sc:<vmac>` key never collide even with an identical invoke ID.
+func TestGatewayMixedIPAndSCSameInvokeID(t *testing.T) {
+	dev := newFakeDevice(t, "127.0.0.1")
+	f := startGateway(t, Config{DeviceAddr: dev.addr().String()}, nil)
+	leg := &fakeSCLeg{}
+	f.g.AttachSC(leg)
+	ipc := newTestClient(t)
+
+	scClient := sc.MAC{0x02, 0x00, 0x00, 0x00, 0x00, 0x30}
+	oidIP := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 30}
+	oidSC := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 31}
+
+	// Both legs use client invoke ID 7 at the same time.
+	ipc.send(readProperty(7, oidIP, bacnet.PropertyPresentValue), f.addr())
+	leg.deliver(t, scClient, bacnet.NPDU{}, readProperty(7, oidSC, bacnet.PropertyPresentValue))
+
+	// The device must see two distinct requests with distinct device-leg IDs.
+	devID := map[bacnet.ObjectID]byte{}
+	devSrc := map[bacnet.ObjectID]*net.UDPAddr{}
+	for i := 0; i < 2; i++ {
+		a, _, src := dev.mustRecv(t, 2*time.Second)
+		if a.Type != bacnet.PDUConfirmedRequest {
+			t.Fatalf("device got %s, want a confirmed request", a.Type)
+		}
+		oid := readObjectID(t, a)
+		devID[oid] = a.InvokeID
+		devSrc[oid] = src
+	}
+	if devID[oidIP] == devID[oidSC] {
+		t.Fatalf("both legs got device invoke id %d; they must not share one", devID[oidIP])
+	}
+
+	// Answer in the opposite order to the requests: correlation must not
+	// depend on arrival order.
+	dev.send(t, readPropertyACK(devID[oidSC], oidSC, bacnet.PropertyPresentValue, []byte{devID[oidSC]}), devSrc[oidSC])
+	dev.send(t, readPropertyACK(devID[oidIP], oidIP, bacnet.PropertyPresentValue, []byte{devID[oidIP]}), devSrc[oidIP])
+
+	// The IP client gets its answer, with its own invoke ID and value.
+	ipAck, _ := ipc.mustRecv(t, 2*time.Second)
+	if ipAck.Type != bacnet.PDUComplexACK || ipAck.InvokeID != 7 {
+		t.Fatalf("IP answer = %+v, want a complex ack for invoke 7", ipAck)
+	}
+	if got := readObjectID(t, ipAck); got != oidIP {
+		t.Fatalf("IP answer for %v, want %v", got, oidIP)
+	}
+	if value := ipAck.Payload[8 : len(ipAck.Payload)-1]; !bytes.Equal(value, []byte{devID[oidIP]}) {
+		t.Fatalf("IP value = %x, want device id %d", value, devID[oidIP])
+	}
+
+	// The SC client gets its answer, addressed to its VMAC, same invoke ID.
+	sent := leg.wait(t, 1, 2*time.Second)
+	if sent[0].dest != scClient {
+		t.Fatalf("SC answer sent to %s, want %s", sent[0].dest, scClient)
+	}
+	scAck := decodeSCNPDU(t, sent[0].npdu)
+	if scAck.Type != bacnet.PDUComplexACK || scAck.InvokeID != 7 {
+		t.Fatalf("SC answer = %+v, want a complex ack for invoke 7", scAck)
+	}
+	if got := readObjectID(t, scAck); got != oidSC {
+		t.Fatalf("SC answer for %v, want %v", got, oidSC)
+	}
+	if value := scAck.Payload[8 : len(scAck.Payload)-1]; !bytes.Equal(value, []byte{devID[oidSC]}) {
+		t.Fatalf("SC value = %x, want device id %d", value, devID[oidSC])
+	}
+
+	if got := testutil.ToFloat64(f.metrics.Pending); got != 0 {
+		t.Fatalf("pending = %v after both answers, want 0", got)
+	}
+}
+
+// TestGatewaySCRateBucketIndependentOfIP proves the rate-limit buckets do not
+// leak across legs: draining an IP client's token must not spend an SC node's
+// token. The two keys (`ip:port` and `sc:<vmac>`) are opaque to the limiter,
+// so an accidental shared key would show up here as a wrongly refused SC
+// request.
+func TestGatewaySCRateBucketIndependentOfIP(t *testing.T) {
+	dev := newFakeDevice(t, "127.0.0.1")
+	f := startGateway(t, Config{DeviceAddr: dev.addr().String()},
+		access.NewPolicy(nil, access.NewLimit(1), nil))
+	leg := &fakeSCLeg{}
+	f.g.AttachSC(leg)
+	ipc := newTestClient(t)
+
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 32}
+	scClient := sc.MAC{0x02, 0x00, 0x00, 0x00, 0x00, 0x31}
+
+	// The IP client spends its only token, then is rate-limited.
+	ipc.send(readProperty(1, oid, bacnet.PropertyPresentValue), f.addr())
+	dev.mustRecv(t, 2*time.Second)
+	ipc.send(readProperty(2, oid, bacnet.PropertyPresentValue), f.addr())
+	dev.expectNothing(t, 300*time.Millisecond)
+
+	// The SC node still has its own token.
+	leg.deliver(t, scClient, bacnet.NPDU{}, readProperty(3, oid, bacnet.PropertyPresentValue))
+	dev.mustRecv(t, 2*time.Second)
+
+	if got := testutil.ToFloat64(f.metrics.RateLimited); got != 1 {
+		t.Fatalf("rate-limited = %v, want 1 (only the IP client)", got)
+	}
+}
+
+// TestGatewaySCReplayCacheServesRepeatRequest proves the completed-response
+// replay works across the leg boundary: a retransmitted SC request with the
+// same invoke ID is answered from the cache without a second device request,
+// and the answer still goes back over the SC leg.
+func TestGatewaySCReplayCacheServesRepeatRequest(t *testing.T) {
+	dev := newFakeDevice(t, "127.0.0.1")
+	f := startGateway(t, Config{DeviceAddr: dev.addr().String()}, nil)
+	leg := &fakeSCLeg{}
+	f.g.AttachSC(leg)
+
+	client := sc.MAC{0x02, 0x00, 0x00, 0x00, 0x00, 0x32}
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 33}
+
+	leg.deliver(t, client, bacnet.NPDU{}, readProperty(5, oid, bacnet.PropertyPresentValue))
+	req, _, src := dev.mustRecv(t, 2*time.Second)
+	dev.send(t, readPropertyACK(req.InvokeID, oid, bacnet.PropertyPresentValue, []byte{0x44, 0x3F, 0x80, 0x00, 0x00}), src)
+
+	if sent := leg.wait(t, 1, 2*time.Second); sent[0].dest != client {
+		t.Fatalf("answer sent to %s, want %s", sent[0].dest, client)
+	}
+
+	// The same request again must be served from the replay cache: the device
+	// sees nothing new, and the SC client gets a second identical answer.
+	leg.deliver(t, client, bacnet.NPDU{}, readProperty(5, oid, bacnet.PropertyPresentValue))
+	dev.expectNothing(t, 300*time.Millisecond)
+	sent := leg.wait(t, 2, 2*time.Second)
+	replayed := decodeSCNPDU(t, sent[1].npdu)
+	if replayed.Type != bacnet.PDUComplexACK || replayed.InvokeID != 5 {
+		t.Fatalf("replayed answer = %+v, want a complex ack for invoke 5", replayed)
+	}
+	if got := readObjectID(t, replayed); got != oid {
+		t.Fatalf("replayed answer for %v, want %v", got, oid)
+	}
+}

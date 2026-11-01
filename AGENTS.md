@@ -175,15 +175,19 @@ file to re-read and the flags came from the command line.
   suite is structured and maintainable. Share fixtures (`harness_test.go`)
   instead of copying them.
 - **Fuzz targets** live in `internal/bacnet/fuzz_test.go`, the SC codec
-  (`internal/bacnet/sc/fuzz_test.go`), and the WebSocket frame parser
-  (`internal/scnet` `FuzzParseFrame`). Every parser entry point has one; a
-  crash is a bug, not a corpus entry to hide.
+  (`internal/bacnet/sc/fuzz_test.go`: `FuzzParse` for the header and
+  `FuzzDecodeMessage` for every typed body decoder), and the WebSocket frame
+  parser (`internal/scnet` `FuzzParseFrame`). Every parser entry point has one;
+  a crash is a bug, not a corpus entry to hide.
 - **SC tests** run a real in-process TLS 1.3 hub (`internal/scnet/node_test.go`)
-  for connect/heartbeat/reconnect and destination filtering, and drive the
+  for connect/heartbeat/reconnect, heartbeat timeout, hub-list failover,
+  malformed/non-binary frame survival and destination filtering, and drive the
   proxy data plane through an in-memory SC leg (`internal/proxy/sc_test.go`)
-  for two clients with the same invoke ID, per-VMAC ACL/rate, write denial, COV
-  fan-out and I-Am fan-out. Keep those two seams separate: the fake leg proves
-  the data plane, the TLS hub proves the transport.
+  for two clients with the same invoke ID, an IP and an SC client sharing an
+  invoke ID, per-VMAC ACL/rate, per-leg rate isolation, write denial, replay
+  across the leg boundary, COV fan-out and I-Am fan-out. Keep those two seams
+  separate: the fake leg proves the data plane, the TLS hub proves the
+  transport.
 - **Oracle golden bytes** for the SC codec come from bacpypes3
   (`scripts/sc-golden.py`, cross-checked against bacnet-stack's `bvlc-sc.c`).
   Regenerate and compare with `internal/bacnet/sc/sc_test.go` when a peer
@@ -217,18 +221,22 @@ Done in v1:
 - CLI, config validation, `SIGHUP` reload, systemd watchdog, selftest probe.
 - Metrics, logger, panic isolation, soak tests.
 - BVLL-SC codec (`internal/bacnet/sc`): header/options and all node↔hub
-  message bodies, golden-byte cross-checked against bacpypes3, own fuzz target.
+  message bodies, golden-byte cross-checked against bacpypes3, with a fuzz
+  target for the header (`FuzzParse`) and one for every typed body decoder
+  (`FuzzDecodeMessage`).
 - SC transport (`internal/scnet`): TLS 1.3 + a fuzzed RFC 6455 frame parser,
-  a node state machine (connect handshake, heartbeats, reconnect/failover),
-  and inbound filtering (destination VMAC and origin required). Tested against
-  a real in-process TLS hub.
+  a node state machine (connect handshake, heartbeats + heartbeat timeout,
+  reconnect/failover across a hub list), and inbound filtering (destination
+  VMAC and origin required). A malformed or non-binary frame drops the
+  connection but not the process. Tested against a real in-process TLS hub.
 - SC front leg in the data plane: the `peer` abstraction, VMAC-keyed client
   identity, opt-in `access.sc_allow`, per-VMAC rate bucket, and the shared
   pending/replay/COV/write-policy path. Config (`sc:` block and flags),
   `sc_allow` reload, and an opt-in VMAC list.
-- SC data-plane tests: two clients with the same invoke ID, per-VMAC ACL and
-  rate, write denial with the tagged Error PDU, COV notification routing and
-  I-Am fan-out.
+- SC data-plane tests: two clients with the same invoke ID, an IP and an SC
+  client sharing an invoke ID, per-VMAC ACL and rate, per-leg rate isolation,
+  write denial with the tagged Error PDU, replay across the leg boundary, COV
+  notification routing and I-Am fan-out.
 - bacpypes3 interop: read, Who-Is, denied write, SIGHUP reload to an allowed
   write, uncovered write still denied, read-back of the written value.
 - bacnet-stack SC interop (`make interop-sc`): the proxy joins bacnet-stack
