@@ -94,10 +94,13 @@ Done:
 
 Remaining:
 
-- UUID-keyed admission. The BVLL-SC data path carries the sender's VMAC but
-  not its UUID; a UUID rule needs Address-Resolution and a bounded VMAC→UUID
-  cache. `access.sc_allow` currently accepts VMAC entries only and rejects a
-  UUID entry rather than pretending to enforce it.
+- UUID-keyed admission is not implementable for hub-delivered traffic. The
+  hub attributes a frame to a VMAC only; the spec's Address-Resolution returns
+  a direct-connection WebSocket URI, not a UUID, and the only place a peer's
+  UUID is carried is a direct Connect-Accept. SC direct (node-to-node) is out
+  of scope, so a UUID rule would not be enforceable today. `access.sc_allow`
+  accepts VMAC entries only and rejects a UUID entry rather than pretending to
+  enforce it. A future direct-connection mode could add UUID admission.
 
 The clear device leg stays plain BACnet/IP.
 

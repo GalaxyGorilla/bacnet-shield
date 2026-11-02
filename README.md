@@ -335,9 +335,10 @@ every other Shield control.
 
 The proxy rejects a node's frame addressed to another VMAC and a frame without
 an originating VMAC, even though the hub should already have routed it
-correctly, and it never asserts its own originating VMAC on the way out. It does
-not implement address resolution, so the allow-list is keyed by VMAC only; a
-UUID-keyed rule would need that exchange and is backlog.
+correctly, and it never asserts its own originating VMAC on the way out. The
+hub attributes a frame only to a VMAC, so the allow-list is keyed by VMAC; a
+UUID rule cannot be enforced for hub-delivered traffic and is rejected rather
+than pretended to work.
 
 Flags mode has the same surface: `--sc-vmac`, `--sc-uuid`, `--sc-hub`,
 `--sc-ca`, `--sc-cert`, `--sc-key` and `--sc-allow`.

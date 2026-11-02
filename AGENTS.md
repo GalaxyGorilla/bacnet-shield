@@ -329,9 +329,11 @@ Done in v1:
 Known boundaries:
 
 - No physical-device commissioning yet (see README).
-- SC admission is VMAC-only. UUID-keyed admission needs Address-Resolution,
-  which the node does not implement; `access.sc_allow` rejects a UUID entry
-  rather than pretending to enforce it.
+- SC admission is VMAC-only. UUID-keyed admission cannot be enforced for
+  hub-delivered traffic (the hub attributes a frame to a VMAC; Address-
+  Resolution returns a direct-connection URI, not a UUID, and SC direct is out
+  of scope); `access.sc_allow` rejects a UUID entry rather than pretending to
+  enforce it.
 - No SC hub role and no SC direct (node-to-node) connections; the proxy is
   always a WebSocket client of a hub.
 - No BBMD/router and no traffic between co-hosted devices; each entry is an
