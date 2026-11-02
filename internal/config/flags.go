@@ -14,6 +14,7 @@ type Options struct {
 	ListenAddr      string
 	DeviceAddr      string
 	DeviceLocalAddr string
+	ExtraListen     []string
 	DeviceInstance  int
 	RequestTimeout  int
 	MaxPending      int
@@ -47,6 +48,7 @@ func Register(fs *pflag.FlagSet) *Options {
 	fs.StringVar(&o.ListenAddr, "listen", ":47808", "client leg address (BACnet/IP; an IPv6 literal selects BACnet/IPv6)")
 	fs.StringVar(&o.DeviceAddr, "device", "", "device leg address (required in flags mode)")
 	fs.StringVar(&o.DeviceLocalAddr, "device-local", "", "source address of the device leg (default: ephemeral)")
+	fs.StringArrayVar(&o.ExtraListen, "extra-listen", nil, "additional front-leg bind address for the same device (repeatable)")
 	fs.IntVar(&o.DeviceInstance, "device-instance", -1, "expected device instance (optional)")
 	fs.IntVar(&o.RequestTimeout, "request-timeout", 30, "seconds a forwarded request may stay pending")
 	fs.IntVar(&o.MaxPending, "max-pending", 256, "in-flight request cap (1..256)")
@@ -85,6 +87,7 @@ func (o *Options) Build() (*Config, error) {
 	d := Device{
 		Name:               o.DeviceAddr,
 		ListenAddr:         o.ListenAddr,
+		ExtraListen:        o.ExtraListen,
 		DeviceAddr:         o.DeviceAddr,
 		DeviceLocalAddr:    o.DeviceLocalAddr,
 		RequestTimeoutSecs: o.RequestTimeout,

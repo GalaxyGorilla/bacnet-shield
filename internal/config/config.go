@@ -57,6 +57,11 @@ type Device struct {
 	// the standard port 47808, so a client's broadcast Who-Is still reaches
 	// the whole building.
 	ListenAddr string `yaml:"listen_addr"`
+	// ExtraListen are optional additional front-leg bind addresses for the
+	// SAME device. Every door shares one device leg, access policy and
+	// pending/replay/COV state, so a second VLAN or a second address family
+	// does not duplicate device traffic. Each entry may be IPv4 or IPv6.
+	ExtraListen []string `yaml:"extra_listen"`
 	// DeviceAddr is this device's address on the clear leg.
 	DeviceAddr string `yaml:"device_addr"`
 	// DeviceLocalAddr is the optional source address of the device leg.
@@ -302,6 +307,18 @@ func (d *Device) validate(i int, seenNames map[string]bool, seenListen map[strin
 		return fail("listen_addr %q is already used by device %q", d.ListenAddr, prev)
 	}
 	seenListen[d.ListenAddr] = label
+	for i, extra := range d.ExtraListen {
+		if err := validateHostPort(fmt.Sprintf("extra_listen[%d]", i), extra); err != nil {
+			return fail("%s", err)
+		}
+		if extra == d.DeviceAddr {
+			return fail("extra_listen[%d] %q is the device address; the proxy would forward to itself", i, extra)
+		}
+		if prev, dup := seenListen[extra]; dup {
+			return fail("extra_listen[%d] %q is already used by device %q", i, extra, prev)
+		}
+		seenListen[extra] = label
+	}
 
 	if err := d.validateSC(label, seenVMAC); err != nil {
 		return err

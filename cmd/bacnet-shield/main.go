@@ -118,6 +118,7 @@ func buildDevices(cfg *config.Config, log *zap.Logger, reg *prometheus.Registry,
 		met := observ.NewMetricsForDevice(reg, d.Name)
 		g, err := proxy.New(proxy.Config{
 			ListenAddr:      d.ListenAddr,
+			ExtraListen:     d.ExtraListen,
 			DeviceAddr:      d.DeviceAddr,
 			DeviceLocalAddr: d.DeviceLocalAddr,
 			RequestTimeout:  time.Duration(d.RequestTimeoutSecs) * time.Second,
@@ -268,12 +269,20 @@ func runGateway(args []string) int {
 
 	log.Info("bacnet-shield gateway listening", zap.Int("devices", len(devices)))
 	for _, rd := range devices {
+		addrs := rd.gw.ClientAddrs()
 		fields := []zap.Field{
 			zap.String("device", rd.dev.Name),
-			zap.String("listen", rd.gw.ClientAddr().String()),
+			zap.String("listen", addrs[0].String()),
 			zap.String("device_addr", rd.dev.DeviceAddr),
 			zap.String("device_local", rd.gw.DeviceLocalAddr().String()),
 			zap.Int("max_pending", rd.dev.MaxPending),
+		}
+		if len(addrs) > 1 {
+			extra := make([]string, 0, len(addrs)-1)
+			for _, a := range addrs[1:] {
+				extra = append(extra, a.String())
+			}
+			fields = append(fields, zap.Strings("extra_listen", extra))
 		}
 		if rd.sc != nil {
 			fields = append(fields, zap.String("sc_vmac", rd.dev.SC.VMAC), zap.Strings("sc_hubs", rd.dev.SC.Hubs))
@@ -445,6 +454,7 @@ func deviceRestartOnlyChanges(name string, old, next *config.Device) []string {
 		}
 	}
 	add("listen_addr", old.ListenAddr, next.ListenAddr)
+	add("extra_listen", fmt.Sprint(old.ExtraListen), fmt.Sprint(next.ExtraListen))
 	add("device_addr", old.DeviceAddr, next.DeviceAddr)
 	add("device_local_addr", old.DeviceLocalAddr, next.DeviceLocalAddr)
 	if old.RequestTimeoutSecs != next.RequestTimeoutSecs {
@@ -655,7 +665,8 @@ Usage (flags, no config file — one device, plug and play):
       [--write-default deny|allow] [--write-allow <spec>]... \
       [--write-deny <spec>]... [--request-timeout <secs>] \
       [--max-pending <n>] [--device-instance <n>] \
-      [--device-local <ip:port>] [--metrics-addr <addr>] \
+      [--device-local <ip:port>] [--extra-listen <ip:port>]... \
+      [--metrics-addr <addr>] \
       [--audit-file <path>] [--audit-max-mb <n>] \
       [--log-level <lvl>] \
       [--sc-vmac <vmac> --sc-uuid <uuid> --sc-hub <wss://url>... \

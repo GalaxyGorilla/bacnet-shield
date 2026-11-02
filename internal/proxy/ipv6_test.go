@@ -460,6 +460,42 @@ func waitDeviceVMAC(t *testing.T, f *fixture) {
 	t.Fatal("device virtual address was not resolved")
 }
 
+// captureResolution reads the proxy's VirtualAddressResolution without
+// answering it. Tests use it when they want to prove the address is learned
+// from a normal frame instead.
+func (d *fakeDevice6) captureResolution(t *testing.T) (*net.UDPAddr, bacnet.VMAC) {
+	t.Helper()
+	_ = d.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 65535)
+	n, src, err := d.conn.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("ipv6 device resolution capture: %v", err)
+	}
+	b, err := bacnet.ParseBVLC6(buf[:n])
+	if err != nil {
+		t.Fatalf("ipv6 device resolution frame: %v", err)
+	}
+	if b.Function != bacnet.BVLC6VirtualAddressResolution {
+		t.Fatalf("ipv6 device got %s, want virtual-address-resolution", b.Function)
+	}
+	return src, b.Src
+}
+
+// sendBroadcast sends a device-originated original broadcast (an I-Am, for
+// example) so the proxy can learn the device's virtual address from its
+// source.
+func (d *fakeDevice6) sendBroadcast(t *testing.T, a bacnet.APDU, to *net.UDPAddr) {
+	t.Helper()
+	frame := bacnet.BVLC6{
+		Function: bacnet.BVLC6OriginalBroadcastNPDU,
+		Src:      d.vmac,
+		Data:     bacnet.NPDU{APDU: a.Marshal()}.Marshal(),
+	}.Marshal()
+	if _, err := d.conn.WriteToUDP(frame, to); err != nil {
+		t.Fatalf("ipv6 device broadcast: %v", err)
+	}
+}
+
 func TestGatewayIPv6DeviceLegWithIPv4Client(t *testing.T) {
 	dev := newFakeDevice6(t)
 	f := startGateway(t, Config{ListenAddr: "127.0.0.1:0", DeviceAddr: dev.addr().String()}, nil)

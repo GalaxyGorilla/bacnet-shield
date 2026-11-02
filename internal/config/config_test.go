@@ -268,6 +268,55 @@ func TestValidateIPv6FrontLeg(t *testing.T) {
 	}
 }
 
+func TestExtraListenParsing(t *testing.T) {
+	c, err := decode(t, oneDevice("device_addr: 192.0.2.10:47808\nextra_listen: [\"192.0.2.11:47808\", \"[::1]:47808\"]\n"))
+	if err != nil {
+		t.Fatalf("extra_listen rejected: %v", err)
+	}
+	got := c.Devices[0].ExtraListen
+	if len(got) != 2 || got[0] != "192.0.2.11:47808" || got[1] != "[::1]:47808" {
+		t.Fatalf("extra_listen = %v", got)
+	}
+}
+
+func TestExtraListenRejections(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{"duplicate primary", oneDevice("device_addr: 192.0.2.10:47808\nextra_listen: [\"127.0.0.1:47808\"]\n")},
+		{"duplicate extra", oneDevice("device_addr: 192.0.2.10:47808\nextra_listen: [\"192.0.2.11:47808\", \"192.0.2.11:47808\"]\n")},
+		{"device address", oneDevice("device_addr: 192.0.2.10:47808\nextra_listen: [\"192.0.2.10:47808\"]\n")},
+		{"bad address", oneDevice("device_addr: 192.0.2.10:47808\nextra_listen: [\"nope\"]\n")},
+	}
+	for _, tc := range cases {
+		if _, err := decode(t, tc.yaml); err == nil {
+			t.Errorf("%s: accepted", tc.name)
+		}
+	}
+}
+
+func TestValidateIPv6Combinations(t *testing.T) {
+	sc := "sc:\n  vmac: \"02:00:00:00:00:01\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [wss://hub/]\n"
+	cases := []string{
+		oneDevice("listen_addr: \"[::]:47808\"\ndevice_addr: \"[2001:db8:20::42]:47808\"\ndevice_local_addr: \"[2001:db8:20::2]:47809\"\n"),
+		oneDevice("listen_addr: 192.0.2.10:47808\ndevice_addr: \"[2001:db8:20::42]:47808\"\nextra_listen: [\"[::1]:47808\"]\n"),
+		oneDevice("listen_addr: \"[::]:47808\"\ndevice_addr: 192.0.2.10:47808\n" + sc),
+	}
+	for _, entry := range cases {
+		if _, err := decode(t, entry); err != nil {
+			t.Fatalf("valid IPv6 combination rejected: %v\n%s", err, entry)
+		}
+	}
+
+	dup := "devices:\n" +
+		"  - {name: a, listen_addr: \"[::1]:47808\", device_addr: 10.0.0.1:47808}\n" +
+		"  - {name: b, listen_addr: \"[::1]:47808\", device_addr: 10.0.0.2:47808}\n"
+	if _, err := decode(t, dup); err == nil {
+		t.Fatal("duplicate IPv6 listen address accepted")
+	}
+}
+
 func TestValidateIPv6DeviceLeg(t *testing.T) {
 	// The other mixed shape: an IPv4 (or IPv6) front leg in front of an IPv6
 	// device.

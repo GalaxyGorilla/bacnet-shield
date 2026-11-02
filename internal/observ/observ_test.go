@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -234,5 +235,26 @@ func get(t *testing.T, url string, timeout time.Duration) string {
 			t.Fatalf("GET %s never answered: %v", url, lastErr)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestHealthEndpoints: an HA supervisor or systemd probe needs a tiny 200 on a
+// path that does not parse Prometheus output. Anything else stays 404.
+func TestHealthEndpoints(t *testing.T) {
+	m := NewMetrics()
+	for _, path := range []string{"/healthz", "/readyz"} {
+		rec := httptest.NewRecorder()
+		m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s returned %d", path, rec.Code)
+		}
+		if rec.Body.Len() == 0 {
+			t.Fatalf("%s returned an empty body", path)
+		}
+	}
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/not-a-probe", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown path returned %d, want 404", rec.Code)
 	}
 }

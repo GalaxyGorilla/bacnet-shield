@@ -556,3 +556,28 @@ func TestPolicyDeviceBudgetSharedAcrossLegs(t *testing.T) {
 		t.Fatalf("SC request = %v, want the shared device-budget denial", d)
 	}
 }
+
+// TestPolicyAllowedIPDoesNotCharge: the IPv6 link layer uses AllowedIP for
+// address resolution. It must answer only for an on-list peer, and it must not
+// spend a data token: a resolution frame never reaches the device.
+func TestPolicyAllowedIPDoesNotCharge(t *testing.T) {
+	list, err := NewList([]string{"10.0.0.0/8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewPolicy(list, NewLimit(1), nil)
+
+	if !p.AllowedIP(net.ParseIP("10.1.2.3")) {
+		t.Fatal("on-list IP rejected")
+	}
+	if p.AllowedIP(net.ParseIP("192.168.1.1")) {
+		t.Fatal("off-list IP admitted")
+	}
+	now := time.Now()
+	if d := p.CheckData(net.ParseIP("10.1.2.3"), now); d != Allow {
+		t.Fatalf("first data check = %v, want allow (resolution must not spend a token)", d)
+	}
+	if d := p.CheckData(net.ParseIP("10.1.2.3"), now); d != DenyRate {
+		t.Fatalf("second data check = %v, want rate denial", d)
+	}
+}

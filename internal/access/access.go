@@ -187,6 +187,27 @@ func (p *Policy) Check(ip net.IP, now time.Time) Decision {
 	if !p.list.Allowed(ip) {
 		return DenyACL
 	}
+	return p.CheckData(ip, now)
+}
+
+// AllowedIP reports the allow-list decision without charging the rate limit or
+// the shared device budget. The IPv6 link layer uses it for address
+// resolution: an off-list peer must stay silent, but a resolution frame never
+// reaches the device, so it must not spend a data token.
+func (p *Policy) AllowedIP(ip net.IP) bool {
+	if p == nil {
+		return true
+	}
+	return p.list.Allowed(ip)
+}
+
+// CheckData applies the per-client rate limit and the shared device budget. It
+// is the second half of Check, exposed for the IPv6 path where the ACL was
+// already applied to a link-layer frame that may not be data.
+func (p *Policy) CheckData(ip net.IP, now time.Time) Decision {
+	if p == nil {
+		return Allow
+	}
 	if !p.limit.Allow(ip, now) {
 		return DenyRate
 	}

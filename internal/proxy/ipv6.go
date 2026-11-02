@@ -9,6 +9,7 @@ import (
 
 	"github.com/GalaxyGorilla/bacnet-shield/internal/access"
 	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/observ"
 )
 
 // resolveAddr chooses the socket family from a configured address. An empty
@@ -54,9 +55,12 @@ func deriveVMAC(addr *net.UDPAddr) bacnet.VMAC {
 // source; what remains is the IPv6 link layer. The device leg stays plain
 // BACnet/IPv4, so the frame is reduced to its NPDU here and wrapped for the
 // device by the normal forwarding path.
-func (g *Gateway) handleClientIPv6(dg []byte, src *net.UDPAddr, now time.Time, pol *access.Policy) {
+func (g *Gateway) handleClientIPv6(dg []byte, src *net.UDPAddr, l clientListener, now time.Time, pol *access.Policy) {
 	b, err := bacnet.ParseBVLC6(dg)
 	if err != nil {
+		// An undecodable frame cannot be a link-layer resolution request, so
+		// it is charged like data even though it never reaches the device.
+		_ = pol.CheckData(src.IP, now)
 		g.metrics.ParseErrors.Inc()
 		g.log.Debug("client bvlc6 parse", zap.Error(err), zap.Stringer("client", src))
 		return
@@ -67,23 +71,39 @@ func (g *Gateway) handleClientIPv6(dg []byte, src *net.UDPAddr, now time.Time, p
 		// The requester wants this node's virtual address. Answering is a
 		// link-layer service, but it is still gated by the ACL above so an
 		// off-list peer cannot confirm that a proxy is present.
-		g.sendLinkFrame(bacnet.BVLC6{
+		g.sendLinkFrame(l, bacnet.BVLC6{
 			Function: bacnet.BVLC6VirtualAddressResolutionACK,
-			Src:      g.clientVMAC,
+			Src:      l.vmac,
 			Dst:      b.Src,
 		}.Marshal(), src)
 		return
 	case bacnet.BVLC6AddressResolution:
 		// A peer that already knows the virtual address asks for the IPv6
 		// station behind it. Only answer when the target is this node.
-		if b.Dst == g.clientVMAC {
-			g.sendLinkFrame(bacnet.BVLC6{
+		if b.Dst == l.vmac {
+			g.sendLinkFrame(l, bacnet.BVLC6{
 				Function: bacnet.BVLC6AddressResolutionACK,
-				Src:      g.clientVMAC,
+				Src:      l.vmac,
 				Dst:      b.Src,
 			}.Marshal(), src)
 		}
 		return
+	}
+
+	switch pol.CheckData(src.IP, now) {
+	case access.DenyRate:
+		g.metrics.RateLimited.Inc()
+		g.recordAudit(observ.AuditEvent{Event: "rate_limited", Leg: "ip", Client: src.String(), Reason: "per_client_rate"})
+		g.log.Debug("client denied by rate limit", zap.Stringer("client", src))
+		return
+	case access.DenyDevice:
+		g.metrics.DeviceRateLimited.Inc()
+		g.recordAudit(observ.AuditEvent{Event: "device_budget_denied", Leg: "ip", Client: src.String(), Reason: "device_budget"})
+		g.log.Debug("client denied by the shared device budget", zap.Stringer("client", src))
+		return
+	}
+
+	switch b.Function {
 	case bacnet.BVLC6OriginalUnicastNPDU, bacnet.BVLC6OriginalBroadcastNPDU:
 		// The data path.
 	default:
@@ -95,19 +115,20 @@ func (g *Gateway) handleClientIPv6(dg []byte, src *net.UDPAddr, now time.Time, p
 
 	p := &udpPeer{
 		addr:      src,
-		conn:      g.clientConn,
+		conn:      l.conn,
 		ipv6:      true,
 		vmac:      b.Src,
-		localVMAC: g.clientVMAC,
+		localVMAC: l.vmac,
 	}
 	g.touchClient(p, now)
 	g.handleClientNPDU(b.Data, p, now, pol)
 }
 
-// sendLinkFrame writes one link-layer frame (not an NPDU) to a client. It is
-// used only by the IPv6 address-resolution exchange.
-func (g *Gateway) sendLinkFrame(frame []byte, src *net.UDPAddr) {
-	if _, err := g.clientConn.WriteToUDP(frame, src); err != nil {
+// sendLinkFrame writes one link-layer frame (not an NPDU) to a client on the
+// listener it arrived on. It is used only by the IPv6 address-resolution
+// exchange.
+func (g *Gateway) sendLinkFrame(l clientListener, frame []byte, src *net.UDPAddr) {
+	if _, err := l.conn.WriteToUDP(frame, src); err != nil {
 		g.log.Debug("client leg write", zap.Error(err), zap.Stringer("client", src))
 	}
 }

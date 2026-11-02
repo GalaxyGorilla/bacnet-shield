@@ -49,8 +49,12 @@ import (
 type Config struct {
 	// ListenAddr is the client leg. ":47808" is the BACnet/IP port. An IPv6
 	// literal (for example "[::]:47808") selects the BACnet/IPv6 link layer
-	// for this listener; the device leg remains IPv4.
+	// for this listener; the device leg is independent.
 	ListenAddr string
+	// ExtraListen are additional front-leg bind addresses for the same
+	// device. They share the device leg, policy, pending/replay/COV tables,
+	// so a second VLAN or address family does not duplicate device traffic.
+	ExtraListen []string
 	// DeviceAddr is the one legacy device on the clear leg. It must be a
 	// unicast address; IPv4 is the usual case, and an IPv6 literal selects
 	// the BACnet/IPv6 device leg. The proxy accepts device-leg datagrams only
@@ -118,6 +122,15 @@ const (
 	deviceVMACRetry = 2 * time.Second
 )
 
+// clientListener is one front-leg socket. A device may have several (extra
+// front doors sharing one device leg and one set of routing tables); each has
+// its own address family and, for IPv6, its own virtual address.
+type clientListener struct {
+	conn *net.UDPConn
+	ipv6 bool
+	vmac bacnet.VMAC
+}
+
 // Gateway is one running proxy instance.
 type Gateway struct {
 	cfg     Config
@@ -127,13 +140,11 @@ type Gateway struct {
 	audit   *observ.Audit
 	policy  atomic.Pointer[access.Policy]
 
-	clientConn *net.UDPConn
-	clientIPv6 bool
-	clientVMAC bacnet.VMAC
-	deviceConn *net.UDPConn
-	deviceAddr *net.UDPAddr
-	deviceIP   net.IP
-	deviceIPv6 bool
+	clientListeners []clientListener
+	deviceConn      *net.UDPConn
+	deviceAddr      *net.UDPAddr
+	deviceIP        net.IP
+	deviceIPv6      bool
 	// deviceLocalVMAC is this proxy's virtual address on an IPv6 device leg;
 	// deviceVMAC is the device's, learned through address resolution (or any
 	// frame it sends). A nil deviceVMAC means "not resolved yet".
@@ -185,36 +196,47 @@ func New(cfg Config, pol *access.Policy, log *zap.Logger, m *observ.Metrics) (*G
 		return nil, fmt.Errorf("proxy: device address %q: %w", cfg.DeviceAddr, err)
 	}
 	deviceIPv6 := deviceNetwork == "udp6"
-	listenAddr, network, err := resolveAddr(cfg.ListenAddr)
-	if err != nil {
-		return nil, fmt.Errorf("proxy: listen address %q: %w", cfg.ListenAddr, err)
+	listenAddrs := append([]string{cfg.ListenAddr}, cfg.ExtraListen...)
+	listeners := make([]clientListener, 0, len(listenAddrs))
+	closeListeners := func() {
+		for _, l := range listeners {
+			_ = l.conn.Close()
+		}
 	}
-	clientConn, err := net.ListenUDP(network, listenAddr)
-	if err != nil {
-		return nil, fmt.Errorf("proxy: bind client leg %q: %w", cfg.ListenAddr, err)
-	}
-	clientIPv6 := network == "udp6"
-	var clientVMAC bacnet.VMAC
-	if clientIPv6 {
-		clientVMAC = deriveVMAC(listenAddr)
+	for _, addr := range listenAddrs {
+		ua, network, err := resolveAddr(addr)
+		if err != nil {
+			closeListeners()
+			return nil, fmt.Errorf("proxy: listen address %q: %w", addr, err)
+		}
+		conn, err := net.ListenUDP(network, ua)
+		if err != nil {
+			closeListeners()
+			return nil, fmt.Errorf("proxy: bind client leg %q: %w", addr, err)
+		}
+		l := clientListener{conn: conn, ipv6: network == "udp6"}
+		if l.ipv6 {
+			l.vmac = deriveVMAC(ua)
+		}
+		listeners = append(listeners, l)
 	}
 	var local *net.UDPAddr
 	if cfg.DeviceLocalAddr != "" {
 		var localNetwork string
 		local, localNetwork, err = resolveAddr(cfg.DeviceLocalAddr)
 		if err != nil {
-			_ = clientConn.Close()
+			closeListeners()
 			return nil, fmt.Errorf("proxy: device local address %q: %w", cfg.DeviceLocalAddr, err)
 		}
 		if localNetwork != deviceNetwork {
-			_ = clientConn.Close()
+			closeListeners()
 			return nil, fmt.Errorf("proxy: device local address %q is %s but device address %q is %s",
 				cfg.DeviceLocalAddr, localNetwork, cfg.DeviceAddr, deviceNetwork)
 		}
 	}
 	deviceConn, err := net.ListenUDP(deviceNetwork, local)
 	if err != nil {
-		_ = clientConn.Close()
+		closeListeners()
 		return nil, fmt.Errorf("proxy: bind device leg: %w", err)
 	}
 	var deviceLocalVMAC bacnet.VMAC
@@ -227,9 +249,7 @@ func New(cfg Config, pol *access.Policy, log *zap.Logger, m *observ.Metrics) (*G
 		log:             log,
 		metrics:         m,
 		audit:           cfg.Audit,
-		clientConn:      clientConn,
-		clientIPv6:      clientIPv6,
-		clientVMAC:      clientVMAC,
+		clientListeners: listeners,
 		deviceConn:      deviceConn,
 		deviceAddr:      deviceAddr,
 		deviceIP:        deviceAddr.IP,
@@ -254,10 +274,20 @@ func New(cfg Config, pol *access.Policy, log *zap.Logger, m *observ.Metrics) (*G
 	return g, nil
 }
 
-// ClientAddr is the bound client-leg address. Tests use it with ":0"; the
-// command uses it for the readiness log.
+// ClientAddr is the primary bound client-leg address. Tests use it with ":0";
+// the command uses it for the readiness log.
 func (g *Gateway) ClientAddr() *net.UDPAddr {
-	return g.clientConn.LocalAddr().(*net.UDPAddr)
+	return g.clientListeners[0].conn.LocalAddr().(*net.UDPAddr)
+}
+
+// ClientAddrs returns every bound front-leg address, primary first. Extra
+// front doors are listed after it in config order.
+func (g *Gateway) ClientAddrs() []*net.UDPAddr {
+	out := make([]*net.UDPAddr, len(g.clientListeners))
+	for i, l := range g.clientListeners {
+		out[i] = l.conn.LocalAddr().(*net.UDPAddr)
+	}
+	return out
 }
 
 // DeviceLocalAddr is the bound source address of the device leg.
@@ -276,8 +306,11 @@ func (g *Gateway) SetPolicy(p *access.Policy) { g.policy.Store(p) }
 // requests and closes the sockets. A bind error is reported by New, so Serve
 // only returns after shutdown.
 func (g *Gateway) Serve(ctx context.Context) error {
-	g.wg.Add(4)
-	safego.Go(g.log, "gateway client loop", func() { defer g.wg.Done(); g.clientLoop(ctx) })
+	g.wg.Add(3 + len(g.clientListeners))
+	for _, l := range g.clientListeners {
+		l := l
+		safego.Go(g.log, "gateway client loop", func() { defer g.wg.Done(); g.clientLoop(ctx, l) })
+	}
 	safego.Go(g.log, "gateway device loop", func() { defer g.wg.Done(); g.deviceLoop(ctx) })
 	safego.Go(g.log, "gateway sweeper", func() { defer g.wg.Done(); g.sweepLoop(ctx) })
 	safego.Go(g.log, "gateway vmac resolution", func() { defer g.wg.Done(); g.resolveLoop(ctx) })
@@ -296,7 +329,9 @@ func (g *Gateway) Serve(ctx context.Context) error {
 // read without closing the socket.
 func (g *Gateway) drain() {
 	g.draining.Store(true)
-	_ = g.clientConn.SetReadDeadline(time.Now())
+	for _, l := range g.clientListeners {
+		_ = l.conn.SetReadDeadline(time.Now())
+	}
 	grace := g.drainTimeout
 	if grace <= 0 {
 		grace = drainGrace
@@ -321,19 +356,22 @@ func (g *Gateway) drain() {
 	}
 }
 
-// Close closes both sockets. It is idempotent.
+// Close closes every socket. It is idempotent.
 func (g *Gateway) Close() error {
 	var err error
 	g.closeOnce.Do(func() {
-		err = errors.Join(g.clientConn.Close(), g.deviceConn.Close())
+		for _, l := range g.clientListeners {
+			err = errors.Join(err, l.conn.Close())
+		}
+		err = errors.Join(err, g.deviceConn.Close())
 	})
 	return err
 }
 
-func (g *Gateway) clientLoop(ctx context.Context) {
+func (g *Gateway) clientLoop(ctx context.Context, l clientListener) {
 	buf := make([]byte, 65535)
 	for {
-		n, src, err := g.clientConn.ReadFromUDP(buf)
+		n, src, err := l.conn.ReadFromUDP(buf)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
@@ -342,7 +380,7 @@ func (g *Gateway) clientLoop(ctx context.Context) {
 			continue
 		}
 		dg := buf[:n]
-		safego.Dispatch(g.log, "gateway client datagram", func() { g.handleClient(dg, src) })
+		safego.Dispatch(g.log, "gateway client datagram", func() { g.handleClient(dg, src, l) })
 	}
 }
 

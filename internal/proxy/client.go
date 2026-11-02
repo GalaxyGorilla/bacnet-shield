@@ -14,7 +14,7 @@ import (
 // handleClient is the BACnet/IP front-leg entry point for one datagram. It
 // runs under safego.Dispatch, so a decoder panic costs one datagram, not the
 // gateway.
-func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
+func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr, l clientListener) {
 	g.metrics.Requests.Inc()
 	now := time.Now()
 	pol := g.policy.Load()
@@ -22,6 +22,20 @@ func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
 	// The client checks run before any parsing: an off-list or flooding
 	// source must not make the proxy decode its datagram, and an off-list
 	// source must never consume another client's rate budget.
+	//
+	// The IPv6 link layer is special: address resolution must be answered for
+	// an admitted client without charging the data rate, so the ACL is
+	// checked here and the rate/budget after the frame type is known.
+	if l.ipv6 {
+		if !pol.AllowedIP(src.IP) {
+			g.metrics.ACLDenied.Inc()
+			g.recordAudit(observ.AuditEvent{Event: "acl_denied", Leg: "ip", Client: src.String()})
+			g.log.Debug("client denied by acl", zap.Stringer("client", src))
+			return
+		}
+		g.handleClientIPv6(dg, src, l, now, pol)
+		return
+	}
 	switch pol.Check(src.IP, now) {
 	case access.DenyACL:
 		g.metrics.ACLDenied.Inc()
@@ -37,11 +51,6 @@ func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
 		g.metrics.DeviceRateLimited.Inc()
 		g.recordAudit(observ.AuditEvent{Event: "device_budget_denied", Leg: "ip", Client: src.String(), Reason: "device_budget"})
 		g.log.Debug("client denied by the shared device budget", zap.Stringer("client", src))
-		return
-	}
-
-	if g.clientIPv6 {
-		g.handleClientIPv6(dg, src, now, pol)
 		return
 	}
 
@@ -64,7 +73,7 @@ func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
 		return
 	}
 
-	p := &udpPeer{addr: src, conn: g.clientConn}
+	p := &udpPeer{addr: src, conn: l.conn}
 	g.touchClient(p, now)
 	g.handleClientNPDU(b.Data, p, now, pol)
 }

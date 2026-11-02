@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -165,21 +166,32 @@ func NewProcessMetrics(reg *prometheus.Registry) *Metrics {
 	}
 }
 
-// HandlerFor serves a shared registry at /metrics. With several device
-// instrument sets on one registry, this is the single scrape endpoint.
+// HandlerFor serves a shared registry at /metrics, plus /healthz and /readyz.
+// With several device instrument sets on one registry, this is the single
+// scrape endpoint. The health endpoints are deliberately tiny: an HA
+// supervisor or systemd probe needs a 200 with no body parsing, and readiness
+// here means the metrics listener is up, which the command only starts after
+// every listener bound.
 func HandlerFor(reg *prometheus.Registry) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok\n")
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ready\n")
+	})
 	return mux
 }
 
-// Handler is the metrics endpoint. It serves /metrics and nothing else: a
+// Handler is the metrics endpoint for a single Metrics set. It serves the same
+// /metrics, /healthz and /readyz as HandlerFor, and nothing else: a
 // root-mounted promhttp handler would answer every path with the scrape, which
 // makes the surface larger than it needs to be and hides a typo in a probe URL.
 func (m *Metrics) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{}))
-	return mux
+	return HandlerFor(m.reg)
 }
 
 // Listen binds the metrics listener synchronously, so a bad address (or a

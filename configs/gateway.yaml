@@ -38,8 +38,16 @@ devices:
     # An IPv6 literal selects the BACnet/IPv6 front leg instead:
     #   listen_addr: "[::]:47808"      # all IPv6 interfaces
     #   listen_addr: "[::1]:47808"     # loopback (tests)
-    # The device leg stays plain IPv4; a mixed listener is the retrofit shape.
+    # The device leg is independent; a mixed listener is the retrofit shape.
     listen_addr: ":47808"
+
+    # Optional additional front doors for the SAME device. Every door shares
+    # one device leg, one access policy and one set of pending/replay/COV
+    # tables, so a second VLAN or a second address family does not duplicate
+    # device traffic. Each entry may be IPv4 or IPv6.
+    # extra_listen:
+    #   - "10.8.0.2:47808"
+    #   - "[::]:47809"
 
     # The one legacy device on the clear leg. It must be a unicast address;
     # IPv4 is the usual case. An IPv6 literal (for example

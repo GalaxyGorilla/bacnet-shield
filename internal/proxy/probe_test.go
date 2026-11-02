@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,52 @@ func TestProbeDeviceReadProperty(t *testing.T) {
 	}
 	if !strings.Contains(got.res.Detail, "ReadProperty(device,1001,object-name) ok") {
 		t.Fatalf("detail = %q", got.res.Detail)
+	}
+}
+
+func TestProbeDeviceIPv6WhoIs(t *testing.T) {
+	dev := newFakeDevice6(t)
+
+	done := make(chan ProbeResult, 1)
+	go func() {
+		res, err := ProbeDevice(context.Background(), dev.addr().String(), nil)
+		if err != nil {
+			t.Errorf("ProbeDevice: %v", err)
+		}
+		done <- res
+	}()
+
+	req, src, proxyVMAC := dev.mustRecv(t, 3*time.Second)
+	if req.Type != bacnet.PDUUnconfirmedRequest || req.Service != bacnet.ServiceWhoIs {
+		t.Fatalf("probe request = %+v", req)
+	}
+	dev.send(t, iam(1001), src, proxyVMAC)
+
+	res := <-done
+	if res.Device != (bacnet.ObjectID{Type: bacnet.ObjectDevice, Instance: 1001}) {
+		t.Fatalf("device = %v", res.Device)
+	}
+	if !strings.Contains(res.Detail, "Who-Is answered by device,1001") {
+		t.Fatalf("detail = %q", res.Detail)
+	}
+}
+
+func TestProbeDeviceIPv6TimesOut(t *testing.T) {
+	conn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback, Port: 0})
+	if err != nil {
+		t.Fatalf("silent ipv6 device bind: %v", err)
+	}
+	defer conn.Close()
+
+	instance := uint32(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := ProbeDevice(ctx, conn.LocalAddr().String(), &instance); err == nil {
+		t.Fatal("ProbeDevice succeeded with no device answer")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("ProbeDevice took %s to give up", elapsed)
 	}
 }
 
