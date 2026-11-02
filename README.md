@@ -184,7 +184,7 @@ pairs in one process, not a BACnet device stack and not a router.
 | BACnet/SC clients through an existing hub | SC direct (node-to-node) connections |
 | Confirmed and unconfirmed services, payload opaque | Service translation or object/property remapping |
 | SubscribeCOV, SubscribeCOVProperty and SubscribeCOVPropertyMultiple | Segmented subscriptions (denied fail-closed) |
-| Segmented requests and responses (except segmented writes) | Segmented writes (denied fail-closed) |
+| Segmented requests and responses, including authorized segmented writes | Segmented writes larger than the 16 KiB reassembly bound |
 | IPv4 BACnet/IP on the device leg | BACnet/IPv6 |
 
 A client broadcast is forwarded to **that listener's device** as unicast: a
@@ -236,8 +236,12 @@ proxies:
   `default: allow` is a deny-list.
 - **Fail closed on the undecodable.** A write whose target cannot be decoded is
   denied, never forwarded "because we could not tell".
-- **Segmented writes are denied.** The policy would see only the first segment,
-  so a client could hide a forbidden target in a later one.
+- **Segmented writes are reassembled first.** The proxy acknowledges the
+  client's segments itself, authorizes the complete request, and only then
+  forwards it as one unsegmented write. A forbidden target in a later segment
+  is therefore still seen, and a denied segmented write gets the same Error PDU
+  as a denied single-datagram write. A reassembly larger than 16 KiB, or one
+  that arrives out of order, is refused rather than guessed at.
 - **Service-level writes need the default.** CreateObject, DeleteObject,
   ReinitializeDevice, DeviceCommunicationControl, file writes, list edits and
   the other state-changing services have no object target to match, so only
@@ -372,8 +376,11 @@ space.
    is answered with an Error PDU so the device stops retransmitting.
 
 Segmented responses and device-initiated segmented requests are tracked per
-invoke ID and relayed; the proxy does not reassemble the payload. Every state
-table is bounded and swept once per second, and a soak test asserts flat
+invoke ID and relayed; the proxy does not reassemble their payloads. A
+segmented *write* is the exception: the proxy acts as the server for the
+client's segment transfer, acknowledges each non-final segment, reassembles the
+APDU, authorizes every target, and forwards one unsegmented request. Every
+state table is bounded and swept once per second, and a soak test asserts flat
 goroutines/heap with zero unanswered requests.
 
 ## Quick start
@@ -486,6 +493,8 @@ no device label.
 | `bacnet_shield_replayed_total` | Retransmissions answered from the finished-response cache |
 | `bacnet_shield_retransmits_dropped_total` | Retransmissions dropped while the request is in flight |
 | `bacnet_shield_notifications_dropped_total` | Device notifications with no client to receive them |
+| `bacnet_shield_segmented_writes_total` | Segmented writes reassembled for authorization |
+| `bacnet_shield_segmented_writes_rejected_total` | Segmented writes refused because reassembly was unbounded or out of order |
 | `bacnet_shield_request_timeouts_total` | Forwarded requests that expired without a complete answer |
 | `bacnet_shield_audit_dropped_total` | Audit records dropped because the audit queue was full |
 | `bacnet_shield_pending` | Requests currently in flight toward the device |

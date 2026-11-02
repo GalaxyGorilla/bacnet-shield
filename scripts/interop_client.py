@@ -136,6 +136,27 @@ async def run(app: Application, target: Address) -> int:
         print(f"long read {oid} {prop} = {len(text)} chars across segments")
         return 0
 
+    if op == "write-long":
+        # Advertise a small receive size so a large value must be sent as a
+        # segmented confirmed request. The proxy is the server for the
+        # segment transfer: it ACKs each segment, reassembles the APDU,
+        # authorizes the whole write, and forwards it to the device. A proxy
+        # that only inspected the first segment would miss a target hidden
+        # in a later one.
+        app.device_object.maxApduLengthAccepted = 50
+        text = os.environ.get("BACNET_TEXT") or ("segmented-write-" * 16)
+        req = WritePropertyRequest(
+            objectIdentifier=oid,
+            propertyIdentifier=prop,
+            propertyValue=CharacterString(text),
+            destination=target,
+        )
+        resp = await _request(app, req)
+        if isinstance(resp, ErrorRejectAbortNack):
+            return _fail(f"long write returned {resp!r}")
+        print(f"long write {oid} {prop} = {len(text)} chars across segments")
+        return 0
+
     if op == "whois":
         i_ams = await app.who_is(address=target, timeout=3)
         if not i_ams:

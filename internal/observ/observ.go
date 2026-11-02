@@ -55,6 +55,8 @@ type Metrics struct {
 	Replayed             prometheus.Counter
 	Retransmits          prometheus.Counter
 	NotificationsDropped prometheus.Counter
+	SegmentedWrites      prometheus.Counter
+	SegmentedRejected    prometheus.Counter
 	RequestTimeouts      prometheus.Counter
 	AuditDropped         prometheus.Counter
 
@@ -138,6 +140,8 @@ func NewMetricsForDevice(reg *prometheus.Registry, device string) *Metrics {
 		Replayed:             f.NewCounter(c("bacnet_shield_replayed_total", "Retransmissions answered from the finished-response cache.")),
 		Retransmits:          f.NewCounter(c("bacnet_shield_retransmits_dropped_total", "Retransmissions dropped because the request is still in flight.")),
 		NotificationsDropped: f.NewCounter(c("bacnet_shield_notifications_dropped_total", "Device notifications with no client to receive them.")),
+		SegmentedWrites:      f.NewCounter(c("bacnet_shield_segmented_writes_total", "Segmented writes reassembled for authorization.")),
+		SegmentedRejected:    f.NewCounter(c("bacnet_shield_segmented_writes_rejected_total", "Segmented writes refused because reassembly was unbounded or out of order.")),
 		RequestTimeouts:      f.NewCounter(c("bacnet_shield_request_timeouts_total", "Forwarded requests that expired without a complete answer.")),
 		Pending:              f.NewGauge(g("bacnet_shield_pending", "Requests currently in flight toward the device.")),
 		Subscriptions:        f.NewGauge(g("bacnet_shield_cov_subscriptions", "Active COV subscriptions routed by the proxy.")),

@@ -49,6 +49,10 @@ steps, not missing pieces of the documented co-hosting gateway.
   subscription per monitored object, cancellation removes every listed object,
   and both `COVNotificationMultiple` services route to the union of subscribers
   with per-client dedupe. A malformed object list is refused, never broadcast.
+- Authorized segmented writes (B5): the proxy acknowledges the client's
+  segments, reassembles and authorizes the whole request, and forwards one
+  unsegmented write; denial, oversize, out-of-order and replay paths are
+  covered by tests.
 - Graceful shutdown drain and forward-latency/timeout metrics: a request
   already at the device is answered after `SIGTERM` (bounded 2 s), and the
   latency histogram plus `request_timeouts_total` make a slow device visible
@@ -128,10 +132,14 @@ there is no independent-peer drive yet.
 
 ### B5 — Authorized segmented writes
 
-v1 denies every segmented write because the policy would see only the first
-segment. A later version could reassemble the APDU, authorize all targets,
-and forward the original segments unchanged. Until then, fail-closed is the
-correct behavior and the cost is the rare large segmented write.
+DONE. The proxy acts as the server for the client's segment transfer: it
+acknowledges each non-final segment, reassembles the APDU, authorizes every
+target (including one that only appears in a later segment), and forwards one
+unsegmented request. A denied segmented write gets the same tagged Error PDU as
+an unsegmented one and never reaches the device; a completed one is replayed
+from the finish cache on an end-to-end retransmission. Reassembly is bounded to
+16 KiB, out-of-order segments are dropped, and an over-limit transfer is
+rejected.
 
 ### B6 — Segmented-request interop
 

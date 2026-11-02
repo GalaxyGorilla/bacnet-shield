@@ -189,25 +189,6 @@ func TestGatewayUndecodableWriteDenied(t *testing.T) {
 	dev.expectNothing(t, 250*time.Millisecond)
 }
 
-func TestGatewaySegmentedWriteDenied(t *testing.T) {
-	dev := newFakeDevice(t, "127.0.0.1")
-	f := startGateway(t, Config{DeviceAddr: dev.addr().String()}, writePolicy(t, access.ActionAllow, nil))
-	c := newTestClient(t)
-	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 5}
-
-	w := writeProperty(7, oid, bacnet.PropertyPresentValue)
-	w.Segmented = true
-	w.SequenceNumber = 1
-	w.WindowSize = 1
-	c.send(w, f.addr())
-
-	got, _ := c.mustRecv(t, time.Second)
-	if got.Type != bacnet.PDUError {
-		t.Fatalf("segmented write = %+v", got)
-	}
-	dev.expectNothing(t, 250*time.Millisecond)
-}
-
 func TestGatewayUnconfirmedWriteDenied(t *testing.T) {
 	dev := newFakeDevice(t, "127.0.0.1")
 	f := startGateway(t, Config{DeviceAddr: dev.addr().String()}, writePolicy(t, access.ActionDeny, nil))

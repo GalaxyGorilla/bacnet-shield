@@ -85,6 +85,8 @@ devices:
     access:
       read_only: true
 log_level: info
+metrics:
+  addr: "127.0.0.1:47812"
 audit:
   file: "$audit"
 EOF
@@ -99,9 +101,11 @@ devices:
       write_policy:
         default: deny
         rules:
-          - oid: "analog-value:1:present-value"
+          - oid: "analog-value:1:*"
             action: allow
 log_level: info
+metrics:
+  addr: "127.0.0.1:47812"
 audit:
   file: "$audit"
 EOF
@@ -113,7 +117,12 @@ run_client() {
 	BACNET_TARGET="$PROXY_ADDR" BACNET_OP="$1" \
 		BACNET_OID="${2:-analog-value,1}" BACNET_PROP="${3:-present-value}" \
 		BACNET_EXPECT="${4:-}" BACNET_VALUE="${5:-2.5}" \
+		BACNET_TEXT="${BACNET_TEXT:-}" \
 		"$PY" scripts/interop_client.py --address 127.0.0.1:0
+}
+
+scrape_metrics() {
+	curl -fsS "http://127.0.0.1:47812/metrics"
 }
 
 write_config read_only
@@ -162,5 +171,22 @@ run_client read analog-value,1 present-value 4.25 || fail "cov read-back"
 
 echo "== segmented response relayed through the proxy"
 run_client read-long analog-value,1 description 120 || fail "segmented read"
+
+echo "== segmented write reassembled and authorized through the proxy"
+run_client write-long analog-value,1 description || fail "segmented write"
+echo "== read back the segmented-write value"
+run_client read-long analog-value,1 description 256 || fail "segmented write read-back"
+
+echo "== the proxy counted the reassembled segmented write"
+i=0
+while [ "$i" -lt 50 ]; do
+	if scrape_metrics 2>/dev/null | grep -q 'bacnet_shield_segmented_writes_total{device="interop"} 1'; then
+		break
+	fi
+	sleep 0.1
+	i=$((i + 1))
+done
+scrape_metrics 2>/dev/null | grep -q 'bacnet_shield_segmented_writes_total{device="interop"} 1' ||
+	fail "segmented write was not counted"
 
 echo "interop ok"

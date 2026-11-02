@@ -39,7 +39,7 @@ rewritten, and only the front-leg policy can reject a request.
 | Forwarding level | Parse BVLC/NPDU/APDU enough to route and gate; forward the **service payload opaquely**. No re-encoding, no property cache |
 | Correlation | **Rewrite the invoke ID**, not the payload. Per-client ↔ device-leg translation with a 256-entry pending table and a 30 s completed-response cache |
 | Retransmissions | A retransmission of an in-flight request is **dropped** (re-sending a write applies it twice). A finished response is replayed from cache |
-| Security v1 | IP/CIDR allow-list + per-client token bucket + optional shared per-device budget + `read_only` **or** `<object-type>:<instance>:<property>` write policy. Write protection is opt-in: with neither configured, writes pass through. Deny-overrides, allow-must-cover, fail-closed on undecodable/segmented writes |
+| Security v1 | IP/CIDR allow-list + per-client token bucket + optional shared per-device budget + `read_only` **or** `<object-type>:<instance>:<property>` write policy. Write protection is opt-in: with neither configured, writes pass through. Deny-overrides, allow-must-cover, fail-closed on undecodable writes; a segmented write is reassembled and authorized as a whole before it is forwarded |
 | Denial shape | ACL/rate denials are silent. A refused write gets Error class `security` (4) / code `write-access-denied` (40). Unsupported subscriptions get class `services` (5) / code `service-request-denied` (29). An unroutable confirmed COV gets code `unknown-subscription` (79) |
 | COV | Track `SubscribeCOV`, `SubscribeCOVProperty` and `SubscribeCOVPropertyMultiple`. Install only after a SimpleACK; a multiple subscription installs one entry per monitored object, and a notification-multiple routes to the union of subscribers (each client once). Segmented subscriptions are refused |
 | Config changes | `SIGHUP` re-reads `--config` and swaps only the access policy (including `access.sc_allow`). Listener/device/timeout/log/metrics and the whole `sc` block are reported as restart-only warnings. Invalid reload keeps the running policy |
@@ -115,6 +115,7 @@ them. Inside one gateway:
 | `pending` | device invoke ID | `max_pending` (1..256), `request_timeout_secs` |
 | `byClient` | peer key + client invoke ID | one entry per pending request |
 | `done` | peer key + client invoke ID | 2048 entries, 30 s |
+| `segWrites` | peer key + client invoke ID | 64 in-progress writes, 16 KiB each, `request_timeout_secs` |
 | `fromDevice` / `toDevice` | device invoke ID / peer key | `request_timeout_secs`, plus 10 s segment grace |
 | `clients` | peer key (`ip:port` or `sc:<vmac>`) | 1024 entries, 5 min idle |
 | `cov` | monitored object + subscriber process ID + peer key | 4096 subscriptions, optional device lifetime |
@@ -147,8 +148,13 @@ them. Inside one gateway:
   constructed CHOICE (`[0]` opening/closing). The decoders extract one object
   per element and skip the rest structurally; a list with no object is
   rejected, never treated as "everyone". Pinned by `TestCOVMultiple*`.
-- A segmented write is denied before decoding. A non-segmented
-  WritePropertyMultiple is decoded far enough to authorize every target.
+- A segmented write is reassembled before the policy sees it: the proxy is the
+  server for the client's segment transfer, so it acknowledges each non-final
+  segment itself and forwards the complete request as one unsegmented APDU.
+  The policy decodes every target, including one that only appeared in a later
+  segment. A reassembly over 16 KiB or an out-of-order segment is refused, not
+  guessed at. A non-segmented WritePropertyMultiple is decoded far enough to
+  authorize every target.
 - The data plane and the replay cache hold **NPDUs**. The IP leg wraps one in
   `BVLC Original-Unicast` on the way out; the SC leg hands it to
   `Encapsulated-NPDU`. A cached frame tied to one link layer would break the
@@ -261,6 +267,10 @@ Done in v1:
 - COV subscriber mapping, cancellation, expiry, multi-client fan-out and
   multi-object subscriptions (`SubscribeCOVPropertyMultiple` / the two
   `COVNotificationMultiple` services), with per-client dedupe.
+- Authorized segmented writes (B5): the proxy acknowledges the client's
+  segments, reassembles the APDU, authorizes every target, and forwards one
+  unsegmented request; denial, oversize and out-of-order paths are pinned by
+  tests.
 - Device source validation with a learned source port.
 - CLI, config validation, `SIGHUP` reload, systemd watchdog, selftest probe.
 - Metrics, logger, panic isolation, soak tests.
@@ -326,8 +336,17 @@ Known boundaries:
   always a WebSocket client of a hub.
 - No BBMD/router and no traffic between co-hosted devices; each entry is an
   isolated listener↔device pair.
-- Segmented writes and segmented subscriptions are refused.
-- The proxy does not reassemble segmented payloads; it tracks and relays them.
+- Segmented *write* reassembly: the proxy acknowledges the client's segments,
+  authorizes the complete request, and forwards one unsegmented APDU. A
+  forbidden target in a later segment is still seen, a denied write gets the
+  tagged Error PDU, and a completed segmented write is replayed from the cache
+  on an end-to-end retransmission. Out-of-order segments are dropped and an
+  over-16-KiB reassembly is rejected.
+- Segmented subscriptions are refused (the proxy does not reassemble a
+  subscription and would otherwise install something the client did not ask
+  for).
+- Outside the segmented-write path, the proxy does not reassemble segmented
+  payloads; it tracks and relays them.
 - `ListenAddr` on macOS cannot use `127.0.0.2`/`127.0.0.3`; tests use separate
   ports on `127.0.0.1`. This is a host limitation, not a product one.
 

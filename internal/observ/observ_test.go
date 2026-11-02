@@ -69,6 +69,8 @@ func TestMetricsScrape(t *testing.T) {
 	m.SCConnected.Set(1)
 	m.SCReconnects.Inc()
 	m.RequestTimeouts.Inc()
+	m.SegmentedWrites.Inc()
+	m.SegmentedRejected.Inc()
 	m.ForwardLatency.Observe(0.012)
 
 	body := scrape(t, m.Handler())
@@ -80,6 +82,8 @@ func TestMetricsScrape(t *testing.T) {
 		"bacnet_shield_sc_connected 1",
 		"bacnet_shield_sc_reconnects_total 1",
 		"bacnet_shield_request_timeouts_total 1",
+		"bacnet_shield_segmented_writes_total 1",
+		"bacnet_shield_segmented_writes_rejected_total 1",
 		"bacnet_shield_forward_latency_seconds_count 1",
 		// Every named instrument must be registered. This list is the
 		// contract the gateway's counters rely on.

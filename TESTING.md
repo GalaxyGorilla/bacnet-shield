@@ -15,9 +15,9 @@ local `make` target.
 | SC transport | Real in-process TLS 1.3 hub: connect handshake, heartbeat and heartbeat *timeout* (a hub that stops ACKing is dropped), reconnect and failover across a hub list, hostname verification, destination/origin filtering, attach/detach state reporting, and survival of a malformed frame and a non-binary WebSocket message |
 | SC data plane | In-memory SC leg: two clients with the same invoke ID, an IP and an SC client sharing an invoke ID, per-VMAC ACL/rate, per-leg rate isolation, write denial shape, COV routing, I-Am fan-out, replay served across the leg boundary, shared pending |
 | COV | Subscription install after ACK, rejected subscription not routed, cancellation, expiry, multi-client fan-out, unroutable confirmed notification; multi-object subscribe/notify decoding (request, confirmed and unconfirmed notification), per-client dedupe, cancellation of every listed object |
-| Segments | Segmented responses and device requests relayed with per-invoke tracking; segmented writes denied; a real peer's multi-segment response is reassembled through the proxy (`make interop`) |
+| Segments | Segmented responses and device requests relayed with per-invoke tracking; segmented writes acknowledged by the proxy, reassembled, authorized as a whole, forwarded unsegmented, denied with the tagged Error PDU, replayed after completion, and bounded/rejected when oversize or out of order; a real peer's multi-segment response is reassembled through the proxy (`make interop`) |
 | Lifecycle | Config validation, reload, restart-only warnings, invalid reload, shutdown drain (an already-forwarded request still gets its answer, a new datagram after cancellation does not), systemd readiness and watchdog; SC config validation and TLS file errors |
-| Independent peer | bacpypes3 0.0.110 drives the built binary as both client and device; BVLL-SC golden bytes come from the same peer; bacnet-stack 1.6.1's `sc-hub` + BSC clients drive the built binary over BACnet/SC (`make interop-sc`), including a COV subscriber |
+| Independent peer | bacpypes3 0.0.110 drives the built binary as both client and device, including a segmented response and a segmented write; BVLL-SC golden bytes come from the same peer; bacnet-stack 1.6.1's `sc-hub` + BSC clients drive the built binary over BACnet/SC (`make interop-sc`), including a COV subscriber |
 | Soak | Spoofed-source rate-limit flood; steady-state forwarding with flat goroutines/heap and zero unanswered requests |
 
 ## Commands
@@ -51,7 +51,15 @@ as failures.
 - A denied write does not consume a device invoke ID.
 - A WritePropertyMultiple that mixes an allowed and a forbidden target is
   denied as a unit.
-- An undecodable or segmented write is denied.
+- An undecodable write is denied.
+- A segmented write is reassembled and authorized as one request: a forbidden
+  target hidden in a later segment is still denied, the device never sees it,
+  and the client gets the tagged Error PDU. A denied segmented write does not
+  consume a device invoke ID.
+- A completed segmented write that is retransmitted end to end is answered from
+  the replay cache, not applied twice.
+- An out-of-order segment is dropped and an over-16-KiB reassembly is rejected;
+  neither reaches the device.
 - An unconfirmed write (`WriteGroup`, `UnconfirmedPrivateTransfer`) is gated
   by the same policy even though it has no reply.
 - A rejected COV subscription is not routed; only a SimpleACK installs it.
@@ -132,7 +140,11 @@ gateway, and drives:
    notification is routed back to the subscriber;
 8. a segmented response: the client advertises a 50-byte max APDU and reads a
    120-byte description, so the proxy must relay every segment and the
-   SegmentACKs.
+   SegmentACKs;
+9. a segmented write: the same client writes a 256-byte description with a
+   50-byte max APDU, so the proxy acknowledges the segments, reassembles and
+   authorizes the write, forwards one unsegmented request, and the value is read
+   back; `/metrics` confirms `bacnet_shield_segmented_writes_total` advanced.
 
 `scripts/interop_client.py` and `scripts/interop_device.py` are real
 bacpypes3 applications, not protocol mocks. See

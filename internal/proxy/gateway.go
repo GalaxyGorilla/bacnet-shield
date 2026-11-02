@@ -129,6 +129,7 @@ type Gateway struct {
 	pending    map[byte]*pendingReq     // device invoke ID -> client request
 	byClient   map[clientKey]byte       // (client, client ID) -> device ID
 	done       map[clientKey]*completed // finished response replay cache
+	segWrites  map[clientKey]*segWrite  // in-progress segmented writes
 	usedIDs    [4]uint64                // device invoke IDs in use
 	fromDevice map[byte]*deviceExchange // device invoke ID -> forwarded client request
 	toDevice   map[clientKey]byte       // (client, client ID) -> device ID
@@ -203,6 +204,7 @@ func New(cfg Config, pol *access.Policy, log *zap.Logger, m *observ.Metrics) (*G
 		pending:      make(map[byte]*pendingReq),
 		byClient:     make(map[clientKey]byte),
 		done:         make(map[clientKey]*completed),
+		segWrites:    make(map[clientKey]*segWrite),
 		fromDevice:   make(map[byte]*deviceExchange),
 		toDevice:     make(map[clientKey]byte),
 		clients:      make(map[string]*clientState),
@@ -364,6 +366,7 @@ func (g *Gateway) sweep(now time.Time) {
 			g.dropExchangeLocked(id)
 		}
 	}
+	g.sweepSegWritesLocked(now)
 	for obj, subs := range g.cov {
 		for k, sub := range subs {
 			if !sub.expires.IsZero() && now.After(sub.expires) {

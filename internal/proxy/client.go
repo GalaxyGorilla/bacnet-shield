@@ -132,6 +132,14 @@ func (g *Gateway) handleClientConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, no
 		return
 	}
 
+	// Segmented writes are reassembled before the policy sees them: the
+	// verdict would otherwise deny every segmented APDU because it can see
+	// only the first segment (see segwrite.go).
+	if a.Segmented && a.Service.IsWrite() {
+		g.handleSegmentedWrite(a, n, p, now, pol)
+		return
+	}
+
 	if allowed, reason := pol.WriteVerdict(a); !allowed {
 		g.metrics.WritesDenied.Inc()
 		targets := writeTargetStrings(a)
