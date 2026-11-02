@@ -31,6 +31,8 @@ flowchart LR
 
 - One legacy device, point your clients at the box →
   [gateway walkthrough](examples/gateway.md).
+- Clients or the device speak IPv6 →
+  [IPv6 walkthrough](examples/ipv6.md).
 - Decide who may connect, how hard they may poll, and which writes pass →
   [access control](examples/access-control.md).
 - Secure clients (BACnet/SC) in front of the same device →
@@ -137,6 +139,7 @@ appliance; appliance-level orchestration remains outside this repository.
 **Not sure which shape is yours?** The one-line picker:
 
 - "I just want a proxy in front of the device" → [Gateway](examples/gateway.md)
+- "My clients or device speak IPv6" → [IPv6](examples/ipv6.md)
 - "I need to decide who may connect and write" → [Access control](examples/access-control.md)
 - "My clients speak BACnet/SC (or a hub already exists)" → [SC front leg](examples/sc.md)
 - "Plant SCADA should monitor the proxy itself" → [Operations](examples/operations.md#monitor)
@@ -144,6 +147,7 @@ appliance; appliance-level orchestration remains outside this repository.
 | Start here | Your situation | What changes |
 |---|---|---|
 | [Gateway](examples/gateway.md) | One legacy BACnet/IP device, one or more clients | Clients point at bacnet-shield; the device stays unchanged |
+| [IPv6](examples/ipv6.md) | The client network, the device, or both are IPv6 | Use an IPv6 literal in `listen_addr` and/or `device_addr` |
 | [Access control](examples/access-control.md) | Different clients deserve different rights | Add an allow-list, a rate limit, and a scoped write policy |
 | [SC front leg](examples/sc.md) | Clients or a head-end speak BACnet/SC | The proxy joins an existing hub as a node; the device stays plain IP |
 | [Operations](examples/operations.md) | The box is deployed | Install as a service, commission, monitor, reload, troubleshoot |
@@ -169,6 +173,21 @@ devices:
       write_policy:
         default: deny
         rules: [{ oid: "analog-value:*:present-value", action: allow }]
+```
+
+**Several front doors for one device.** `extra_listen` gives one device more
+than one client-facing address — a second VLAN, a second address family, or a
+management network. All doors share the same device leg, access policy and
+pending/replay/COV tables, so the device still sees one client and a
+retransmission on one door is still deduplicated on another:
+
+```yaml
+devices:
+  - name: boiler
+    listen_addr: "10.8.0.2:47808"
+    extra_listen: ["[::]:47808", "192.168.0.2:47808"]
+    device_addr: "10.0.0.42:47808"
+    access: { read_only: true }
 ```
 
 Planned work and explicit non-goals are recorded in [BACKLOG.md](BACKLOG.md):
@@ -512,8 +531,11 @@ with its class and code. Both `validate` and `selftest` accept the same flags as
 ## Metrics
 
 Set `metrics.addr` (or `--metrics-addr`) to expose a Prometheus scrape at
-`/metrics`. An empty address disables the listener; bind it to loopback unless
-the monitoring network is trusted. Every per-device counter and gauge carries a
+`/metrics`, plus `/healthz` and `/readyz` for a supervisor. An empty address
+disables the listener; bind it to loopback unless the monitoring network is
+trusted. `/readyz` means the metrics listener is up, which the command only
+starts after every front/device socket bound; it is not a device-reachability
+check (use `selftest` for that). Every per-device counter and gauge carries a
 `device` label (the config entry's `name`, or its `device_addr`), so one scrape
 covers every co-hosted device; the audit-drop counter is process-wide and has
 no device label.
@@ -562,6 +584,12 @@ no device label.
 - **Supply chain** — `make sbom` produces SPDX + CycloneDX documents for the
   release binary (`syft`); `make vulnscan` scans them with `grype` and fails on
   HIGH or worse. Both exit 77 when the tool is missing.
+- **High availability** — the proxy is fail-closed and keeps no on-disk state,
+  so the supported HA shape is an active/passive pair behind a virtual IP
+  (VRRP/keepalived) with `/readyz` as the health check. Pending requests, the
+  replay cache and COV subscriptions do not follow a failover; clients
+  retransmit and must resubscribe. See [docs/ha.md](docs/ha.md). There is no
+  state replication.
 - **No CI by design.** The gates are `make` targets run locally; see
   [TESTING.md](TESTING.md) and [examples/operations.md](examples/operations.md).
 
@@ -603,11 +631,16 @@ the SC transport is also proven against a third-party implementation.
 
 - [`examples/`](examples/) — copy-paste walkthroughs with a scenario picker:
   [gateway](examples/gateway.md) (start here; includes a two-minute BACnet
-  primer), access control, the SC front leg, and the operations guide.
+  primer), [IPv6](examples/ipv6.md), access control, the SC front leg, and the
+  operations guide.
 - [`configs/gateway.yaml`](configs/gateway.yaml) — annotated configuration.
 - [`deploy/`](deploy/) — hardened systemd unit.
 - [`SECURITY.md`](SECURITY.md) — protected assets, trust boundaries, enforced
   controls and deliberate limits.
+- [`docs/business-case.md`](docs/business-case.md) — the problem, who it is
+  for, what it does not solve, and how a pilot can prove it.
+- [`docs/ha.md`](docs/ha.md) — active/passive high availability, what survives a
+  failover and what does not (no state replication).
 - [`TESTING.md`](TESTING.md) — test layers and release/security gates.
 - [`CONFORMANCE.md`](CONFORMANCE.md) — independent-peer results, divergences
   and deliberate limits.

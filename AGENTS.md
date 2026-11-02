@@ -45,10 +45,11 @@ rewritten, and only the front-leg policy can reject a request.
 | Config changes | `SIGHUP` re-reads `--config` and swaps only the access policy (including `access.sc_allow`). Listener/device/timeout/log/metrics and the whole `sc` block are reported as restart-only warnings. Invalid reload keeps the running policy |
 | Secure front leg | BACnet/SC (TLS 1.3 + WebSocket, BVLC-SC `0x82`). The proxy is an SC **node** that attaches to an existing hub (primary + failover), not a hub itself. A private PSK tunnel is explicitly rejected |
 | Front-leg identity | One `peer` abstraction (`Key`, `IP`, `SendNPDU`) keyed by `ip:port` on the IP leg and `sc:<vmac>` on the SC leg. The data plane and its replay cache hold **NPDUs**, not link frames, so both legs share pending, replay, COV and write policy. Never key SC state by connection |
+| Front doors | A device entry has one required `listen_addr` and optional `extra_listen` sockets. Every door shares one device leg, policy and pending/replay/COV tables; the client identity is still its `ip:port`, so a retransmission on another door hits the same replay entry. Each door has its own family and IPv6 virtual address |
 | SC client admission | Opt-in SC allow-list keyed by **VMAC** (`access.sc_allow`). With none configured, any node the hub delivers is accepted and only the write policy gates it (same "protection is opt-in" shape as the IP leg). UUID-keyed rules cannot be enforced through a hub; a UUID entry is rejected rather than silently ignored |
 | SC transport | TLS 1.3 (`crypto/tls`) + a small, fuzzed WebSocket frame parser we own, not a WebSocket dependency. The proxy is always the WebSocket client. The hub is trusted to attribute frames to their originating VMAC; the node still drops a frame addressed to another VMAC or with a zero/missing origin |
 | Device leg | Plain BACnet/IPv4 or BACnet/IPv6 over UDP, independent of the front leg. The SC front leg is additive. An IPv6 device leg discovers the device's 3-octet virtual address with `VirtualAddressResolution` (and learns it from any frame the device sends); requests are dropped until it is known, never sent with a guessed address |
-| IPv6 legs | Opt-in by using an IPv6 literal in `listen_addr` and/or `device_addr`. Parse/serve BACnet/IPv6 (Annex U, link type `0x82`, 3-octet virtual addresses, address resolution) on either leg, reduce a frame to its NPDU, and use the same data plane. `device_local_addr` must match the device's family. All four v4/v6 combinations are supported |
+| IPv6 legs | Opt-in by using an IPv6 literal in `listen_addr` and/or `device_addr`. Parse/serve BACnet/IPv6 (Annex U, link type `0x82`, 3-octet virtual addresses, address resolution) on either leg, reduce a frame to its NPDU, and use the same data plane. `device_local_addr` must match the device's family. All four v4/v6 combinations are supported. Address-resolution frames are ACL-gated but never spend a data token or the device budget: they do not reach the device |
 | Ground truth | ASHRAE 135 wire formats, cross-checked against **bacpypes3 0.0.110** in `.venv`. Vendor divergence is reported in [CONFORMANCE.md](CONFORMANCE.md), never silently adapted away in the proxy |
 | Audit | Opt-in structured stream (`audit.file`), one JSON object per security decision (ACL, rate, device budget, write policy, unsupported subscription), with the decoded target and a closed-set reason for a refused write. Bounded stream: a rotating file (one backup) plus a bounded non-blocking queue that drops-and-counts. Observes decisions; never changes them |
 | No CI | Deliberate user decision across the Shield projects. Gates are local `make` targets |
@@ -194,21 +195,22 @@ YAML mode is the appliance shape and may list several. Both compile to the same
 `config.Config`, so validation and the daemon cannot drift.
 
 A YAML file has process-wide `log_level`, `metrics`, `audit`, and a `devices:`
-list. Each entry carries its own `listen_addr`, `device_addr`,
-`device_local_addr`, `device_instance`, `request_timeout_secs`, `max_pending`,
-`access` block and optional `sc` block. `name` (default: `device_addr`) labels
-the device in logs, metrics and the audit, and is the reload match key; it and
-`listen_addr` and `sc.vmac` must be unique across the process.
+list. Each entry carries its own `listen_addr`, optional `extra_listen`,
+`device_addr`, `device_local_addr`, `device_instance`, `request_timeout_secs`,
+`max_pending`, `access` block and optional `sc` block. `name` (default:
+`device_addr`) labels the device in logs, metrics and the audit, and is the
+reload match key; it, every listener address and `sc.vmac` must be unique
+across the process.
 
 Reloadable on `SIGHUP` (per device, matched by `name`): `access.allow`,
 `access.sc_allow`, `access.rate_per_sec`, `access.device_rate_per_sec`,
 `access.read_only`, `access.write_policy`.
 
 Restart-only (reported, never silently ignored): adding or removing a device,
-and `listen_addr`, `device_addr`, `device_local_addr`, `device_instance`,
-`request_timeout_secs`, `max_pending`, `log_level`, `metrics.addr`, `audit.*`,
-and the whole `sc` block (`vmac`, `uuid`, `hubs`, `ca_file`, `cert_file`,
-`key_file`).
+and `listen_addr`, `extra_listen`, `device_addr`, `device_local_addr`,
+`device_instance`, `request_timeout_secs`, `max_pending`, `log_level`,
+`metrics.addr`, `audit.*`, and the whole `sc` block (`vmac`, `uuid`, `hubs`,
+`ca_file`, `cert_file`, `key_file`).
 
 The SC leg is configured per device, either as an `sc:` YAML block or with
 `--sc-vmac/--sc-uuid/--sc-hub/--sc-ca/--sc-cert/--sc-key`; `sc_allow` is
@@ -316,6 +318,12 @@ Done in v1:
   bound sockets and discovers the device's. The data plane, ACL, rate limit,
   COV and write policy are shared with the IPv4 leg, and all four v4/v6 leg
   combinations are supported.
+- Extra front doors (`extra_listen`): a device may have several client-facing
+  sockets, including mixed IPv4/IPv6, sharing one device leg, policy and
+  pending/replay/COV state. The client identity remains `ip:port`, so a
+  retransmission on another door hits the same replay entry.
+- Operational health: `/healthz` and `/readyz` on the metrics listener, plus an
+  active/passive HA design in `docs/ha.md` (no state replication).
 - SC data-plane tests: two clients with the same invoke ID, an IP and an SC
   client sharing an invoke ID, per-VMAC ACL and rate, per-leg rate isolation,
   write denial with the tagged Error PDU, replay across the leg boundary, COV
@@ -359,6 +367,12 @@ Known boundaries:
 - No independent IPv6 application peer is available to drive either leg yet
   (bacpypes3's application layer raises `NotImplementedError` for IPv6), so the
   IPv6 paths are pinned by wire-level Go tests and a fuzz target.
+- No state-syncing HA. An active/passive pair behind a virtual IP is documented
+  in [docs/ha.md](docs/ha.md); pending requests, the replay cache, COV
+  subscriptions and rate buckets do not follow a failover. There is no
+  consensus/state-replication protocol.
+- No request pacing (`request_delay_ms`) or configurable client idle timeout;
+  the rate limit is a ceiling, not spacing (modbus-shield parity, backlog).
 - No BBMD/router and no traffic between co-hosted devices; each entry is an
   isolated listener↔device pair. `Forwarded-NPDU` and foreign-device frames
   are rejected: accepting them would replace a verified source address with an

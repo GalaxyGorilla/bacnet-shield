@@ -107,6 +107,13 @@ label). The instruments that matter operationally:
 Logs are console-formatted for journald. `log_level: info` records attach/detach,
 denials and reloads; `debug` adds per-datagram routing and parse detail.
 
+The same listener answers `/healthz` (process alive) and `/readyz` (listeners
+are bound). `/readyz` is what a supervisor or VRRP health check should use; it
+does **not** mean the device is reachable. The proxy is fail-closed and has no
+state replication, so HA is an active/passive pair behind a virtual IP — see
+[../docs/ha.md](../docs/ha.md) for what survives a failover (pending requests,
+the replay cache and COV subscriptions do not).
+
 ## Audit trail
 
 Counters tell you *how many* writes were refused; the audit tells you *which*.

@@ -53,6 +53,12 @@ steps, not missing pieces of the documented co-hosting gateway.
   segments, reassembles and authorizes the whole request, and forwards one
   unsegmented write; denial, oversize, out-of-order and replay paths are
   covered by tests.
+- Extra front doors (`extra_listen`): one device may have several client-facing
+  sockets (including mixed IPv4/IPv6) sharing one device leg, policy and
+  pending/replay/COV state, matching modbus-shield's multi-listener shape.
+- Bounded HA: `/healthz` and `/readyz` on the metrics listener plus an
+  active/passive VRRP/keepalived design in [docs/ha.md](docs/ha.md). No state
+  replication; the failover caveats (pending, replay, COV) are explicit.
 - Graceful shutdown drain and forward-latency/timeout metrics: a request
   already at the device is answered after `SIGTERM` (bounded 2 s), and the
   latency histogram plus `request_timeouts_total` make a slow device visible
@@ -197,6 +203,30 @@ guess. `device_local_addr` must match the device's family.
 Open only for validation: no independent IPv6 application peer exists
 (bacpypes3's `Application` raises `NotImplementedError("IPv6")`), so both legs
 are pinned by Go wire tests and `FuzzParseBVLC6`.
+
+### B11 — HA state replication
+
+**Deliberately not implemented.** The supported shape is an active/passive pair
+behind a virtual IP (VRRP/keepalived) with `/readyz` as the health check; the
+design and failover caveats are in [docs/ha.md](docs/ha.md). Pending requests,
+the replay cache, COV subscriptions and rate buckets are in-memory and do not
+follow a failover: clients retransmit, and COV clients must resubscribe. State
+replication would add a consensus/data-sync protocol to a strict forwarder and
+is not planned.
+
+### B12 — Request pacing (`request_delay_ms`)
+
+Open, modbus-shield parity. modbus-shield can enforce a minimum gap between
+requests toward a picky device; bacnet-shield has a rate ceiling but no spacing
+control. A correct implementation needs a send queue or a per-device pacer
+rather than sleeping inside a per-datagram handler, so it is deferred until a
+device needs it.
+
+### B13 — Configurable client idle timeout (`idle_timeout_ms`)
+
+Open, modbus-shield parity. The client table used for unsolicited notifications
+(Who-Is/I-Am, events) is fixed at 5 minutes. Making it configurable is small,
+but no deployment has needed it yet.
 
 ## Open — appliance management integration
 

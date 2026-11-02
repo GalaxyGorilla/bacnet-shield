@@ -9,6 +9,7 @@ BACnet background section, so no prior BACnet knowledge is needed.
 | Walkthrough | Use this when |
 |---|---|
 | [gateway.md](gateway.md) | You have one legacy BACnet/IP device and want it protected — the standard retrofit deployment |
+| [ipv6.md](ipv6.md) | The clients or the device (or both) speak BACnet/IPv6 instead of IPv4 |
 | [access-control.md](access-control.md) | You need to decide who may connect, how hard they may poll, and which writes may pass |
 | [sc.md](sc.md) | Your clients speak BACnet/SC, or a site hub already exists, and you want the secure leg in front of the same device |
 | [operations.md](operations.md) | The box is deployed — day-2: install as a service, commission, monitor, reload the policy in place, troubleshoot |
