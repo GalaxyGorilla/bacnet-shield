@@ -115,7 +115,7 @@ func NewMetricsForDevice(reg *prometheus.Registry, device string) *Metrics {
 		WritesDenied:         f.NewCounter(c("bacnet_shield_writes_denied_total", "Writes refused by the write policy.")),
 		ParseErrors:          f.NewCounter(c("bacnet_shield_parse_errors_total", "Undecodable datagrams dropped.")),
 		PendingFull:          f.NewCounter(c("bacnet_shield_pending_full_total", "Requests dropped because every invoke ID was in flight.")),
-		Unsupported:          f.NewCounter(c("bacnet_shield_unsupported_total", "Frames or services the single-device gateway cannot serve.")),
+		Unsupported:          f.NewCounter(c("bacnet_shield_unsupported_total", "Frames or services the proxy cannot serve.")),
 		Replayed:             f.NewCounter(c("bacnet_shield_replayed_total", "Retransmissions answered from the finished-response cache.")),
 		Retransmits:          f.NewCounter(c("bacnet_shield_retransmits_dropped_total", "Retransmissions dropped because the request is still in flight.")),
 		NotificationsDropped: f.NewCounter(c("bacnet_shield_notifications_dropped_total", "Device notifications with no client to receive them.")),

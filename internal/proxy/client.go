@@ -50,9 +50,9 @@ func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
 	case bacnet.BVLCOriginalUnicastNPDU, bacnet.BVLCOriginalBroadcastNPDU:
 	default:
 		// BBMD functions (Register-Foreign-Device, Forwarded-NPDU, ...) are
-		// not a single-device gateway's job. Rejecting them is honest: a
-		// client behind a BBMD needs the proxy on its own network, not a
-		// silently mangled frame.
+		// not a forwarder's job. Rejecting them is honest: a client behind a
+		// BBMD needs the proxy on its own network, not a silently mangled
+		// frame.
 		g.metrics.Unsupported.Inc()
 		g.log.Debug("client sent an unsupported bvlc function",
 			zap.String("function", b.Function.String()), zap.Stringer("client", src))

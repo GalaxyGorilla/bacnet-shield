@@ -1,5 +1,7 @@
-// Package proxy is the BACnet/IP retrofit gateway: the single box between a
-// building's clients and one legacy device.
+// Package proxy is the BACnet/IP retrofit gateway. A Gateway is one box
+// between a building's clients and ONE legacy device; a Runner composes
+// several independent Gateways into one process (co-hosting), without routing
+// traffic between them.
 //
 //	[N clients] --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [legacy device]
 //
@@ -9,7 +11,7 @@
 // and enforce the front-leg policy (ACL, rate limit, write rules). The service
 // payload itself is forwarded byte for byte, so vendor quirks survive.
 //
-// Two pieces of state make the single-device model work:
+// Two pieces of state make the one-device-per-Gateway model work:
 //
 //   - invoke-ID translation: every client has its own one-octet invoke-ID
 //     space, so two clients may have request 7 in flight at once. The proxy
@@ -349,9 +351,9 @@ func buildNPDU(n bacnet.NPDU, apdu []byte) []byte {
 }
 
 // buildFrame wraps an NPDU as a plain Original-Unicast BACnet/IP frame for the
-// clear device leg. The proxy always speaks unicast to the device, even when a
-// client sent a broadcast: the proxy has exactly one device, so a broadcast is
-// a discovery request aimed at that device.
+// clear device leg. The gateway always speaks unicast to its device, even when a
+// client sent a broadcast: this gateway has exactly one device, so a broadcast
+// is a discovery request aimed at that device.
 func buildFrame(n bacnet.NPDU, apdu []byte) []byte {
 	return bacnet.BVLC{Function: bacnet.BVLCOriginalUnicastNPDU, Data: buildNPDU(n, apdu)}.Marshal()
 }
