@@ -155,14 +155,14 @@ func TestGatewayAuditUnsupportedSubscription(t *testing.T) {
 	f := startGateway(t, Config{DeviceAddr: dev.addr().String(), Audit: audit}, nil)
 
 	c := newTestClient(t)
-	c.send(bacnet.APDU{Type: bacnet.PDUConfirmedRequest, HasService: true,
-		Service: bacnet.ServiceSubscribeCOVPropertyMultiple, InvokeID: 3}, f.addr())
+	c.send(bacnet.APDU{Type: bacnet.PDUConfirmedRequest, HasService: true, Segmented: true,
+		Service: bacnet.ServiceSubscribeCOV, InvokeID: 3}, f.addr())
 
 	ev := readAuditEvent(t, r)
 	if ev.Event != "unsupported_subscription" {
 		t.Fatalf("event = %q, want unsupported_subscription", ev.Event)
 	}
-	if ev.Service != "subscribe-cov-property-multiple" {
+	if ev.Service != "subscribe-cov" {
 		t.Fatalf("service = %q", ev.Service)
 	}
 	dev.expectNothing(t, 200*time.Millisecond)

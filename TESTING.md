@@ -7,14 +7,14 @@ local `make` target.
 | Layer | Evidence |
 |---|---|
 | Codecs | BVLC, NPDU, APDU, tags, object IDs and write targets; malformed, truncated, extended-tag and segmented vectors |
-| Fuzzing | Nine native targets: `FuzzParseBVLC`, `FuzzParseNPDU`, `FuzzParseAPDU`, `FuzzParseObjectID`, `FuzzWriteTargets`, `FuzzTagReader`, `FuzzParse` and `FuzzDecodeMessage` (BVLL-SC), and `FuzzParseFrame` (WebSocket) |
+| Fuzzing | Ten native targets: `FuzzParseBVLC`, `FuzzParseNPDU`, `FuzzParseAPDU`, `FuzzParseObjectID`, `FuzzWriteTargets`, `FuzzTagReader`, `FuzzCOVMultiple`, `FuzzParse` and `FuzzDecodeMessage` (BVLL-SC), and `FuzzParseFrame` (WebSocket) |
 | Policy | Allow-list, per-client rate limit, optional shared per-device budget, read-only, scoped write rules, deny-overrides, allow-must-cover, service-level writes; SC VMAC allow-list and per-VMAC bucket |
 | Audit | JSON-lines writer with time-stamping and omitted empty fields; rotation cap and one-backup bound; drop-and-count under a blocked sink; served end-to-end for a refused write (with decoded target and reason), an ACL denial on each leg, and an unsupported subscription; `ServiceName` for both service-number spaces |
 | Data plane | Real loopback UDP sockets, invoke-ID collision and reuse, retransmission dedupe, pending cap/expiry, routing strip, device source validation, forward-latency histogram, request-timeout counting |
 | Co-hosting | Two listener↔device pairs in one process: each listener reaches its own device (Who-Is/I-Am), a read-only policy on one device does not gate the other, both `device` labels appear on one shared scrape, and a bind conflict fails startup |
 | SC transport | Real in-process TLS 1.3 hub: connect handshake, heartbeat and heartbeat *timeout* (a hub that stops ACKing is dropped), reconnect and failover across a hub list, hostname verification, destination/origin filtering, attach/detach state reporting, and survival of a malformed frame and a non-binary WebSocket message |
 | SC data plane | In-memory SC leg: two clients with the same invoke ID, an IP and an SC client sharing an invoke ID, per-VMAC ACL/rate, per-leg rate isolation, write denial shape, COV routing, I-Am fan-out, replay served across the leg boundary, shared pending |
-| COV | Subscription install after ACK, rejected subscription not routed, cancellation, expiry, multi-client fan-out, unroutable confirmed notification |
+| COV | Subscription install after ACK, rejected subscription not routed, cancellation, expiry, multi-client fan-out, unroutable confirmed notification; multi-object subscribe/notify decoding (request, confirmed and unconfirmed notification), per-client dedupe, cancellation of every listed object |
 | Segments | Segmented responses and device requests relayed with per-invoke tracking; segmented writes denied; a real peer's multi-segment response is reassembled through the proxy (`make interop`) |
 | Lifecycle | Config validation, reload, restart-only warnings, invalid reload, shutdown drain (an already-forwarded request still gets its answer, a new datagram after cancellation does not), systemd readiness and watchdog; SC config validation and TLS file errors |
 | Independent peer | bacpypes3 0.0.110 drives the built binary as both client and device; BVLL-SC golden bytes come from the same peer; bacnet-stack 1.6.1's `sc-hub` + BSC clients drive the built binary over BACnet/SC (`make interop-sc`), including a COV subscriber |
@@ -55,6 +55,14 @@ as failures.
 - An unconfirmed write (`WriteGroup`, `UnconfirmedPrivateTransfer`) is gated
   by the same policy even though it has no reply.
 - A rejected COV subscription is not routed; only a SimpleACK installs it.
+- A `SubscribeCOVPropertyMultiple` installs one subscription per listed object;
+  cancelling it removes every object it names, and a notification-multiple is
+  delivered once per client even when it names several objects that client
+  watches.
+- A notification-multiple with no subscriber is never broadcast; a confirmed
+  one is answered with `unknown-subscription` so the device stops retransmitting.
+- A multi-object subscription whose object list cannot be decoded is refused
+  rather than forwarded, so it can never silently lose notifications.
 - An unroutable confirmed COV notification is answered, so the device stops
   retransmitting.
 - An in-flight retransmission is dropped (a write must not be applied twice);
@@ -129,6 +137,12 @@ gateway, and drives:
 `scripts/interop_client.py` and `scripts/interop_device.py` are real
 bacpypes3 applications, not protocol mocks. See
 [CONFORMANCE.md](CONFORMANCE.md) for what this found.
+
+Multi-object COV (`SubscribeCOVPropertyMultiple` and the two
+`COVNotificationMultiple` services) is pinned by wire-level Go tests only:
+bacpypes3 0.0.110 and bacnet-stack 1.6.1 both mark the service as TODO, so no
+independent peer can drive it yet. The encoding the tests use was checked
+against bacpypes3's `COVMultipleSubscriptionList` / `PropertyValue` encoders.
 
 ### Independent SC peer
 

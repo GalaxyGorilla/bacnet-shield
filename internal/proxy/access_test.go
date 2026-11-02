@@ -238,12 +238,16 @@ func TestGatewayUnconfirmedWriteAllowed(t *testing.T) {
 }
 
 func TestGatewaySubscribeCOVPropertyMultipleDenied(t *testing.T) {
+	// A segmented subscription is still unreadable (the proxy would see only
+	// the first segment), so it is refused; an unsegmented multiple
+	// subscription is forwarded and tracked object by object.
 	dev := newFakeDevice(t, "127.0.0.1")
 	f := startGateway(t, Config{DeviceAddr: dev.addr().String()}, nil)
 	c := newTestClient(t)
 
 	sub := bacnet.APDU{Type: bacnet.PDUConfirmedRequest, InvokeID: 7, HasInvokeID: true,
-		HasService: true, Service: bacnet.ServiceSubscribeCOVPropertyMultiple,
+		HasService: true, Segmented: true,
+		Service: bacnet.ServiceSubscribeCOVPropertyMultiple,
 		Payload: []byte{0x0E, 0x0F}}
 	c.send(sub, f.addr())
 

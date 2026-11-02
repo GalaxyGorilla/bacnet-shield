@@ -148,6 +148,42 @@ func FuzzWriteTargets(f *testing.F) {
 	})
 }
 
+// FuzzCOVMultiple covers the multi-object COV decoders, which walk nested
+// constructed values that a peer controls. The invariant is weak on purpose:
+// no panic, and a successful decode must not manufacture an object instance
+// outside the 22-bit wire range.
+func FuzzCOVMultiple(f *testing.F) {
+	sub := covMultipleSubscribe(7, 60, covMultipleRef(av(1), PropertyPresentValue))
+	notify := covMultipleNotify(9, 1001, av(1), av(2))
+	f.Add(byte(0), sub)
+	f.Add(byte(1), notify)
+	f.Add(byte(2), []byte{0x4E, 0x0E, 0x0C, 0x00, 0x80, 0x00, 0x01, 0x0F, 0x4F})
+	f.Add(byte(3), []byte{})
+	f.Fuzz(func(t *testing.T, kind byte, payload []byte) {
+		var objects []ObjectID
+		if kind%2 == 0 {
+			objs, _, _, _, ok := COVMultipleSubscription(APDU{Type: PDUConfirmedRequest,
+				HasService: true, Service: ServiceSubscribeCOVPropertyMultiple, Payload: payload})
+			if !ok {
+				return
+			}
+			objects = objs
+		} else {
+			objs, _, ok := COVMultipleNotification(APDU{Type: PDUUnconfirmedRequest,
+				HasService: true, Service: ServiceUnconfirmedCOVNotificationMultiple, Payload: payload})
+			if !ok {
+				return
+			}
+			objects = objs
+		}
+		for _, oid := range objects {
+			if oid.Instance > maxObjectInstance {
+				t.Fatalf("instance %d exceeds 22 bits", oid.Instance)
+			}
+		}
+	})
+}
+
 func FuzzTagReader(f *testing.F) {
 	f.Add(seedHex(f, "0c0080000519553e443f8000003f"))
 	f.Add(seedHex(f, "f9142a"))

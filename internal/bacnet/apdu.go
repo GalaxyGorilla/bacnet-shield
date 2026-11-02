@@ -100,6 +100,10 @@ const (
 	ServiceWhoIs                        Service = 8
 	ServiceUTCTimeSynchronization       Service = 9
 	ServiceWriteGroup                   Service = 10
+	// ServiceUnconfirmedCOVNotificationMultiple is the multi-object form of
+	// the COV notification. It is the answer to a
+	// SubscribeCOVPropertyMultiple, not to a plain SubscribeCOV.
+	ServiceUnconfirmedCOVNotificationMultiple Service = 11
 )
 
 // APDU is a parsed application PDU.
@@ -468,17 +472,18 @@ var confirmedServiceNames = map[Service]string{
 }
 
 var unconfirmedServiceNames = map[Service]string{
-	ServiceIAm:                          "i-am",
-	ServiceIHave:                        "i-have",
-	ServiceUnconfirmedCOVNotification:   "unconfirmed-cov-notification",
-	ServiceUnconfirmedEventNotification: "unconfirmed-event-notification",
-	ServiceUnconfirmedPrivateTransfer:   "unconfirmed-private-transfer",
-	ServiceUnconfirmedTextMessage:       "unconfirmed-text-message",
-	ServiceTimeSynchronization:          "time-synchronization",
-	ServiceWhoHas:                       "who-has",
-	ServiceWhoIs:                        "who-is",
-	ServiceUTCTimeSynchronization:       "utc-time-synchronization",
-	ServiceWriteGroup:                   "write-group",
+	ServiceIAm:                        "i-am",
+	ServiceIHave:                      "i-have",
+	ServiceUnconfirmedCOVNotification: "unconfirmed-cov-notification",
+	ServiceUnconfirmedCOVNotificationMultiple: "unconfirmed-cov-notification-multiple",
+	ServiceUnconfirmedEventNotification:       "unconfirmed-event-notification",
+	ServiceUnconfirmedPrivateTransfer:         "unconfirmed-private-transfer",
+	ServiceUnconfirmedTextMessage:             "unconfirmed-text-message",
+	ServiceTimeSynchronization:                "time-synchronization",
+	ServiceWhoHas:                             "who-has",
+	ServiceWhoIs:                              "who-is",
+	ServiceUTCTimeSynchronization:             "utc-time-synchronization",
+	ServiceWriteGroup:                         "write-group",
 }
 
 // ServiceName names the service choice for logging and audit. It returns "" for

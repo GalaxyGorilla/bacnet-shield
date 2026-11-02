@@ -45,6 +45,14 @@ steps, not missing pieces of the documented co-hosting gateway.
   `device` label on one shared registry; the audit names the device. `SIGHUP`
   reloads each device's policy, matched by `name`; adding/removing a device is
   restart-only. Not a router: no BBMD and no traffic between devices.
+- Multi-object COV (B4): `SubscribeCOVPropertyMultiple` installs one
+  subscription per monitored object, cancellation removes every listed object,
+  and both `COVNotificationMultiple` services route to the union of subscribers
+  with per-client dedupe. A malformed object list is refused, never broadcast.
+- Graceful shutdown drain and forward-latency/timeout metrics: a request
+  already at the device is answered after `SIGTERM` (bounded 2 s), and the
+  latency histogram plus `request_timeouts_total` make a slow device visible
+  before clients time out.
 
 ## Open
 
@@ -110,10 +118,13 @@ infrastructure, not a device property; design it explicitly or leave it out.
 
 ### B4 — Multi-object COV subscriptions
 
-`SubscribeCOVPropertyMultiple` (and the confirmed notification-multiple
-service) are refused in v1 because the proxy tracks one monitored object per
-subscription. Supporting them requires a routing table keyed by a list of
-objects and a notification decoder that can fan out per object.
+DONE. `SubscribeCOVPropertyMultiple` installs one subscription per monitored
+object after a SimpleACK, cancellation removes every object it names, and both
+`COVNotificationMultiple` services (confirmed `31`, unconfirmed `11`) fan out
+to the union of subscribers with each client receiving one copy. A malformed
+object list is refused rather than forwarded. Pinned by wire-level Go tests;
+neither bacpypes3 0.0.110 nor bacnet-stack 1.6.1 implements the service, so
+there is no independent-peer drive yet.
 
 ### B5 — Authorized segmented writes
 
@@ -158,6 +169,42 @@ closed-set reason. See [README.md](README.md#audit-trail),
 v1 resolves and binds IPv4 only, and rejects non-IPv4 device addresses
 explicitly. IPv6 support needs its own address handling, ACL semantics and
 tests; it is not a flag flip.
+
+## Open — appliance management integration
+
+bacnet-shield is one protocol module of a planned multi-protocol appliance.
+The sibling Shield projects carry the same list. These items are the contract
+between an unprivileged management UI and the daemon; they are not protocol
+work and are tracked here so the module does not have to be rediscovered later.
+Completion means an unprivileged management UI can safely configure and operate
+the service without duplicating undocumented daemon behavior.
+
+- **A1 Versioned configuration schema:** expose a stable JSON Schema for every
+  YAML field, default, constraint, description, secret, and restart/reload
+  behavior. Generate or test it against the Go configuration types so UI forms
+  cannot silently drift from the daemon.
+- **A2 Restricted local management API:** provide a Unix-socket interface (or a
+  small shared management sidecar) for validate, self-test, apply, reload,
+  restart, status, and rollback. The web process must not run arbitrary shell
+  commands or require unrestricted root access. Keep the protocol data plane
+  independent from the management plane.
+- **A3 Transactional configuration:** stage a revision, run `validate --json`
+  and optional `selftest --json`, install it atomically, reload or restart as
+  required, verify health, and automatically restore the previous known-good
+  revision on failure. Preserve an auditable revision history.
+- **A4 Unified structured status:** expose the active configuration revision
+  and hash, readiness, configured and connected devices, reload result,
+  restart-required fields, and relevant counters as a stable JSON response.
+  Never include credentials or private-key material.
+- **A5 Secret and certificate lifecycle:** define safe upload, ownership,
+  permissions, validation, rotation, expiry reporting, backup, and redaction
+  behavior for the SC CA/client-certificate files. Encryption at rest and
+  master-key custody belong to the appliance layer, not the protocol daemon.
+- **A6 Appliance-level acceptance tests:** exercise the complete web UI/API →
+  staged YAML → validation/self-test → systemd reload/restart → real BACnet
+  traffic path. Cover invalid configuration, interrupted apply, failed
+  self-test, rollback, secret rotation, power loss, and all supported appliance
+  architectures.
 
 ## Non-goals
 

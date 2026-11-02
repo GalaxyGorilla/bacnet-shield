@@ -114,14 +114,13 @@ func (g *Gateway) handleClientConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, no
 	if g.draining.Load() {
 		return
 	}
-	// SubscribeCOVPropertyMultiple carries a list of subscriptions. v1
-	// tracks one monitored object per subscription, so it cannot route the
-	// notifications of a multiple subscription. Denying it with a BACnet
-	// error is better than forwarding it and silently losing notifications.
-	// A segmented subscription is denied for the same reason: the proxy
-	// would see only the first segment.
-	if a.Service == bacnet.ServiceSubscribeCOVPropertyMultiple ||
-		(a.Segmented && (a.Service == bacnet.ServiceSubscribeCOV || a.Service == bacnet.ServiceSubscribeCOVProperty)) {
+	// A segmented subscription is denied: the proxy would see only the first
+	// segment and could install a subscription the client did not ask for.
+	// (A multi-object subscription is decoded as a whole below; only the
+	// segmented form is unreadable.)
+	if a.Segmented && (a.Service == bacnet.ServiceSubscribeCOV ||
+		a.Service == bacnet.ServiceSubscribeCOVProperty ||
+		a.Service == bacnet.ServiceSubscribeCOVPropertyMultiple) {
 		g.metrics.Unsupported.Inc()
 		g.recordAudit(observ.AuditEvent{
 			Event: "unsupported_subscription", Leg: peerLeg(p), Client: p.String(),
@@ -151,8 +150,24 @@ func (g *Gateway) handleClientConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, no
 	}
 
 	var intent *covIntent
-	if obj, procID, lifetime, hasLifetime, ok := bacnet.COVSubscription(a); ok {
-		intent = &covIntent{object: obj, procID: procID, lifetime: lifetime, hasLifetime: hasLifetime}
+	if a.Service == bacnet.ServiceSubscribeCOVPropertyMultiple {
+		objects, procID, lifetime, hasLifetime, ok := bacnet.COVMultipleSubscription(a)
+		if !ok || len(objects) == 0 {
+			// A subscription the proxy cannot decode would be forwarded and
+			// then silently lose every notification. Fail closed instead.
+			g.metrics.Unsupported.Inc()
+			g.recordAudit(observ.AuditEvent{
+				Event: "unsupported_subscription", Leg: peerLeg(p), Client: p.String(),
+				Service: a.ServiceName(), Reason: "undecodable_subscription",
+			})
+			g.log.Info("undecodable subscription request",
+				zap.Stringer("client", p), zap.String("service", a.ServiceName()))
+			g.sendClientError(p, a, bacnet.ErrorClassServices, bacnet.ErrorCodeServiceRequestDenied)
+			return
+		}
+		intent = &covIntent{objects: objects, procID: procID, lifetime: lifetime, hasLifetime: hasLifetime}
+	} else if obj, procID, lifetime, hasLifetime, ok := bacnet.COVSubscription(a); ok {
+		intent = &covIntent{objects: []bacnet.ObjectID{obj}, procID: procID, lifetime: lifetime, hasLifetime: hasLifetime}
 	}
 	g.forwardConfirmed(a, n, p, now, intent)
 }

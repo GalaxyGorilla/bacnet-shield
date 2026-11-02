@@ -141,22 +141,28 @@ func (g *Gateway) handleDeviceResponse(a bacnet.APDU, n bacnet.NPDU, src *net.UD
 	g.sendClientNPDU(npdu, client)
 }
 
-// applyCOVLocked installs or removes a subscription when the device accepts the
-// SubscribeCOV. A rejected subscription never enters the routing table.
+// applyCOVLocked installs or removes subscriptions when the device accepts the
+// subscription request. A rejected subscription never enters the routing table.
+// A multiple subscription is applied object by object; a cancellation removes
+// every object it names.
 func (g *Gateway) applyCOVLocked(p *pendingReq, a bacnet.APDU) {
 	if p.cov == nil || a.Type != bacnet.PDUSimpleACK {
 		return
 	}
 	if !p.cov.hasLifetime {
-		// A SubscribeCOV with no lifetime is a cancellation.
-		g.removeSubLocked(p.cov.object, p.cov.procID, p.client.Key())
+		for _, obj := range p.cov.objects {
+			// A subscription request with no lifetime is a cancellation.
+			g.removeSubLocked(obj, p.cov.procID, p.client.Key())
+		}
 		return
 	}
 	var expires time.Time
 	if p.cov.lifetime > 0 {
 		expires = time.Now().Add(time.Duration(p.cov.lifetime) * time.Second)
 	}
-	g.addSubLocked(p.cov.object, p.cov.procID, p.client, expires)
+	for _, obj := range p.cov.objects {
+		g.addSubLocked(obj, p.cov.procID, p.client, expires)
+	}
 }
 
 // handleDeviceRequest forwards a confirmed request the device initiated (a
@@ -203,7 +209,17 @@ func (g *Gateway) handleDeviceRequest(a bacnet.APDU, n bacnet.NPDU, src *net.UDP
 	}
 
 	var targets []peer
-	if obj, ok := bacnet.COVNotificationObject(a); ok {
+	if bacnet.IsCOVMultipleNotification(a) {
+		objects, procID, ok := bacnet.COVMultipleNotification(a)
+		if !ok {
+			// A confirmed notification whose object list cannot be decoded
+			// has no recipient the proxy can trust; answer rather than
+			// broadcast it to every client.
+			targets = nil
+		} else {
+			targets = g.subscribersForObjectsLocked(objects, procID)
+		}
+	} else if obj, ok := bacnet.COVNotificationObject(a); ok {
 		procID, _ := bacnet.COVNotificationProcessID(a)
 		targets = g.subscribersLocked(obj, procID)
 	} else {
@@ -274,6 +290,25 @@ func (g *Gateway) handleDeviceUnconfirmed(a bacnet.APDU, n bacnet.NPDU) {
 		g.relayToActive(n)
 	case bacnet.ServiceIHave:
 		g.relayToActive(n)
+	case bacnet.ServiceUnconfirmedCOVNotificationMultiple:
+		objects, procID, ok := bacnet.COVMultipleNotification(a)
+		if !ok {
+			g.metrics.ParseErrors.Inc()
+			g.log.Debug("cov notification-multiple without a decodable object list")
+			return
+		}
+		g.mu.Lock()
+		targets := g.subscribersForObjectsLocked(objects, procID)
+		g.mu.Unlock()
+		if len(targets) == 0 {
+			g.metrics.NotificationsDropped.Inc()
+			g.log.Debug("cov notification-multiple without a subscriber")
+			return
+		}
+		npdu := buildNPDU(n, n.APDU)
+		for _, t := range targets {
+			g.sendClientNPDU(npdu, t)
+		}
 	case bacnet.ServiceUnconfirmedCOVNotification:
 		obj, ok := bacnet.COVNotificationObject(a)
 		if !ok {

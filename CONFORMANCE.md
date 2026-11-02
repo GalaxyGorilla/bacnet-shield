@@ -194,10 +194,12 @@ the log line is the whole response.
   peer needs the same payload trick in the other direction.
 - **COV interop is single-object and driver-triggered.** The Python client
   exercises `SubscribeCOV` and an unconfirmed notification, and the SC run
-  drives `SubscribeCOV` through a bacnet-stack subscriber; multi-object
-  (`SubscribeCOVPropertyMultiple`, refused by design), confirmed-notification
-  interop, and subscription expiry across a long run are pinned by in-process
-  tests only.
+  drives `SubscribeCOV` through a bacnet-stack subscriber. Multi-object COV
+  (`SubscribeCOVPropertyMultiple` and the two `COVNotificationMultiple`
+  services) is implemented and pinned by wire-level Go tests, but neither peer
+  implements it (both mark the service TODO), so there is no independent drive
+  yet. Confirmed-notification interop and subscription expiry across a long run
+  are also in-process only.
 - **No BACnet/SC direct (node-to-node) interop.** The proxy attaches to a hub,
   which is the v1 shape. Direct connections are out of scope; see
   [BACKLOG.md](BACKLOG.md).

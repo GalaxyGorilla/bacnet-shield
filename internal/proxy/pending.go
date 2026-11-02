@@ -33,11 +33,14 @@ type pendingReq struct {
 	cov       *covIntent
 }
 
-// covIntent is the subscription state a SubscribeCOV will install if the
-// device answers with a SimpleACK. It is applied on the positive response, not
-// on the request: a rejected subscription must not route notifications.
+// covIntent is the subscription state a SubscribeCOV, SubscribeCOVProperty or
+// SubscribeCOVPropertyMultiple will install if the device answers with a
+// SimpleACK. It is applied on the positive response, not on the request: a
+// rejected subscription must not route notifications. A multiple subscription
+// carries one object per entry and installs them all as independent
+// subscriptions, so a notification about any one of them routes correctly.
 type covIntent struct {
-	object      bacnet.ObjectID
+	objects     []bacnet.ObjectID
 	procID      uint32
 	lifetime    uint32
 	hasLifetime bool
@@ -212,6 +215,26 @@ func (g *Gateway) removeSubLocked(obj bacnet.ObjectID, procID uint32, client str
 	if len(subs) == 0 {
 		delete(g.cov, obj)
 	}
+}
+
+// subscribersForObjectsLocked returns the clients subscribed to any of the
+// objects a COVNotificationMultiple names, with each client once. A multiple
+// notification is one message covering several objects, so a client subscribed
+// to two of them must still receive it only once. Caller holds mu.
+func (g *Gateway) subscribersForObjectsLocked(objects []bacnet.ObjectID, procID uint32) []peer {
+	seen := make(map[string]bool, len(objects))
+	var out []peer
+	for _, obj := range objects {
+		for _, p := range g.subscribersLocked(obj, procID) {
+			key := p.Key()
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // subscribersLocked returns the clients subscribed to obj. It prefers an exact

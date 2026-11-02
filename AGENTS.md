@@ -41,7 +41,7 @@ rewritten, and only the front-leg policy can reject a request.
 | Retransmissions | A retransmission of an in-flight request is **dropped** (re-sending a write applies it twice). A finished response is replayed from cache |
 | Security v1 | IP/CIDR allow-list + per-client token bucket + optional shared per-device budget + `read_only` **or** `<object-type>:<instance>:<property>` write policy. Write protection is opt-in: with neither configured, writes pass through. Deny-overrides, allow-must-cover, fail-closed on undecodable/segmented writes |
 | Denial shape | ACL/rate denials are silent. A refused write gets Error class `security` (4) / code `write-access-denied` (40). Unsupported subscriptions get class `services` (5) / code `service-request-denied` (29). An unroutable confirmed COV gets code `unknown-subscription` (79) |
-| COV | Track `SubscribeCOV` and `SubscribeCOVProperty` (one monitored object each). Install only after a SimpleACK. `SubscribeCOVPropertyMultiple` is refused |
+| COV | Track `SubscribeCOV`, `SubscribeCOVProperty` and `SubscribeCOVPropertyMultiple`. Install only after a SimpleACK; a multiple subscription installs one entry per monitored object, and a notification-multiple routes to the union of subscribers (each client once). Segmented subscriptions are refused |
 | Config changes | `SIGHUP` re-reads `--config` and swaps only the access policy (including `access.sc_allow`). Listener/device/timeout/log/metrics and the whole `sc` block are reported as restart-only warnings. Invalid reload keeps the running policy |
 | Secure front leg | BACnet/SC (TLS 1.3 + WebSocket, BVLC-SC `0x82`). The proxy is an SC **node** that attaches to an existing hub (primary + failover), not a hub itself. A private PSK tunnel is explicitly rejected |
 | Front-leg identity | One `peer` abstraction (`Key`, `IP`, `SendNPDU`) keyed by `ip:port` on the IP leg and `sc:<vmac>` on the SC leg. The data plane and its replay cache hold **NPDUs**, not link frames, so both legs share pending, replay, COV and write policy. Never key SC state by connection |
@@ -139,6 +139,14 @@ them. Inside one gateway:
 - COV notification object is context tag 2; subscription object is context
   tag 1; subscriber process ID is context tag 0. A notification with no
   subscriber is never broadcast to everyone.
+- A COVNotificationMultiple (confirmed `31`, unconfirmed `11`) and a
+  SubscribeCOVPropertyMultiple (`30`) carry their object list under tag 4. A
+  BACnet SEQUENCE element has no tag of its own: each element is `[0] object
+  id` followed by the constructed `[1]` list, so the decoder must not expect an
+  opening tag around an element. A property reference inside `[1]` is itself a
+  constructed CHOICE (`[0]` opening/closing). The decoders extract one object
+  per element and skip the rest structurally; a list with no object is
+  rejected, never treated as "everyone". Pinned by `TestCOVMultiple*`.
 - A segmented write is denied before decoding. A non-segmented
   WritePropertyMultiple is decoded far enough to authorize every target.
 - The data plane and the replay cache hold **NPDUs**. The IP leg wraps one in
@@ -250,7 +258,9 @@ Done in v1:
   in-flight retransmission drop, segmented response/request tracking.
 - Write denial with the correct tagged Error PDU; unsupported subscription
   denial; unroutable confirmed COV answer.
-- COV subscriber mapping, cancellation, expiry and multi-client fan-out.
+- COV subscriber mapping, cancellation, expiry, multi-client fan-out and
+  multi-object subscriptions (`SubscribeCOVPropertyMultiple` / the two
+  `COVNotificationMultiple` services), with per-client dedupe.
 - Device source validation with a learned source port.
 - CLI, config validation, `SIGHUP` reload, systemd watchdog, selftest probe.
 - Metrics, logger, panic isolation, soak tests.
@@ -316,7 +326,7 @@ Known boundaries:
   always a WebSocket client of a hub.
 - No BBMD/router and no traffic between co-hosted devices; each entry is an
   isolated listener↔device pair.
-- Segmented writes are refused; SubscribeCOVPropertyMultiple is refused.
+- Segmented writes and segmented subscriptions are refused.
 - The proxy does not reassemble segmented payloads; it tracks and relays them.
 - `ListenAddr` on macOS cannot use `127.0.0.2`/`127.0.0.3`; tests use separate
   ports on `127.0.0.1`. This is a host limitation, not a product one.

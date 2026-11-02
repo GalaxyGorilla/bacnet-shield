@@ -61,7 +61,8 @@ bacnet-shield is the boundary instead:
 - **Honest refusals** — a denied write is answered with a BACnet Error PDU
   (class `security`, code `write-access-denied`), so the client fails
   immediately instead of timing out.
-- **COV routing** — a client's SubscribeCOV is remembered, and the device's
+- **COV routing** — a client's SubscribeCOV, SubscribeCOVProperty or
+  SubscribeCOVPropertyMultiple is remembered, and the device's
   notifications are delivered back to that client, never broadcast.
 - **Secure front leg** — BACnet/SC clients attach through an existing hub over
   TLS 1.3 + WebSocket and get the same allow-list, rate limit, write policy and
@@ -101,7 +102,7 @@ systemd unit. It is intentionally opinionated about deployment and operations.
 ## Production readiness
 
 The documented v1 scope is implemented and tested as software. The race suite
-drives the built proxy on real loopback sockets; nine native fuzz targets —
+drives the built proxy on real loopback sockets; ten native fuzz targets —
 the BVLC/NPDU/APDU/tag/object-ID codecs, the BVLL-SC body decoders and the
 WebSocket frame parser — run in every `go test`; and two independent BACnet
 stacks drive the built binary through the proxy — bacpypes3 (a Python stack) on
@@ -182,7 +183,7 @@ pairs in one process, not a BACnet device stack and not a router.
 | BACnet/IP clients, unicast and broadcast | A BACnet/SC **hub**: the proxy is a node, not a hub |
 | BACnet/SC clients through an existing hub | SC direct (node-to-node) connections |
 | Confirmed and unconfirmed services, payload opaque | Service translation or object/property remapping |
-| SubscribeCOV and SubscribeCOVProperty (one object each) | SubscribeCOVPropertyMultiple |
+| SubscribeCOV, SubscribeCOVProperty and SubscribeCOVPropertyMultiple | Segmented subscriptions (denied fail-closed) |
 | Segmented requests and responses (except segmented writes) | Segmented writes (denied fail-closed) |
 | IPv4 BACnet/IP on the device leg | BACnet/IPv6 |
 
@@ -360,11 +361,15 @@ space.
    After a response completes, a short-lived cache (30 s) replays that exact
    answer to a client retransmission. A client that reuses an invoke ID for a
    *different* request is treated as a new exchange.
-3. **COV subscriber tracking.** A SubscribeCOV or SubscribeCOVProperty is
-   installed only after the device answers with a SimpleACK. A rejected
-   subscription is never routed. Notifications are mapped back by monitored
-   object and subscriber-process identifier. A confirmed notification with no
-   subscriber is answered with an Error PDU so the device stops retransmitting.
+3. **COV subscriber tracking.** A SubscribeCOV, SubscribeCOVProperty or
+   SubscribeCOVPropertyMultiple is installed only after the device answers with
+   a SimpleACK. A multi-object subscription is installed object by object, so a
+   later notification about any one of them still routes; a single
+   notification-multiple is delivered once to each subscriber even when it names
+   several objects that client watches. A rejected subscription is never
+   routed. Notifications are mapped back by monitored object and
+   subscriber-process identifier. A confirmed notification with no subscriber
+   is answered with an Error PDU so the device stops retransmitting.
 
 Segmented responses and device-initiated segmented requests are tracked per
 invoke ID and relayed; the proxy does not reassemble the payload. Every state
