@@ -11,18 +11,20 @@ From the original motivation:
 > "Retrofitting — adding security capabilities to legacy devices by adding a
 > box in front of them, or even inside their casing."
 
-Deployment model (v1, single-device gateway):
+Deployment model (co-hosting, one process, N independent pairs):
 
 ```
-[N clients]    --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [one legacy device]
+[N clients]    --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [legacy device A]
+[N clients]    --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [legacy device B]
 [N SC nodes] --BACnet/SC--> [existing hub] --> [bacnet-shield] --BACnet/IP-->
 ```
 
-Clients are repointed to the proxy once; the device stays unchanged and keeps
-speaking plain BACnet/IP. The proxy is the device's security gate: client
-allow-list, per-client rate limit, and object/property-scoped write
-protection. It is **not** a BACnet device stack, a BBMD, a router, or an SC
-hub.
+Clients are repointed to the proxy once; the devices stay unchanged and keep
+speaking plain BACnet/IP. Each `devices:` entry is its own front leg, device
+leg and policy; no datagram crosses between entries. The proxy is each device's
+security gate: client allow-list, per-client rate limit, and
+object/property-scoped write protection. It is **not** a BACnet device stack, a
+BBMD, a router, or an SC hub.
 
 The v1 essence: a **strict forwarder** — the service payload goes in and out
 byte for byte; only the link/network headers and the APDU invoke ID are
@@ -33,7 +35,7 @@ rewritten, and only the front-leg policy can reject a request.
 | Topic | Decision |
 |---|---|
 | Language | **Go** — static single binary for appliance use, goroutines for the two UDP legs, race detector + native fuzzing for the test bar |
-| Scope | **One device per instance.** Multi-device, BBMD and routing are backlog; the proxy does not pretend to be a router |
+| Scope | **One or more co-hosted devices per instance**, each an independent listener↔device pair. BBMD, routing and cross-device traffic are backlog; the proxy never pretends to be a router |
 | Forwarding level | Parse BVLC/NPDU/APDU enough to route and gate; forward the **service payload opaquely**. No re-encoding, no property cache |
 | Correlation | **Rewrite the invoke ID**, not the payload. Per-client ↔ device-leg translation with a 256-entry pending table and a 30 s completed-response cache |
 | Retransmissions | A retransmission of an in-flight request is **dropped** (re-sending a write applies it twice). A finished response is replayed from cache |
@@ -59,8 +61,8 @@ internal/bacnet/sc/    BACnet/SC virtual link layer (BVLL-SC) codec
 internal/scnet/        SC transport: TLS 1.3, WebSocket framing, node↔hub state machine
 internal/access/       Allow-list, per-client token bucket, shared device budget, write policy
 internal/config/       YAML + flags, validation, access-policy compilation
-internal/proxy/        Data plane: routing, invoke IDs, COV, firmware probe
-internal/observ/       zap logger, Prometheus registry, /metrics listener, audit stream
+internal/proxy/        Data plane: one Gateway per device, Runner over all gateways, invoke IDs, COV, probe
+internal/observ/       zap logger, shared Prometheus registry (per-device `device` label), /metrics listener, audit stream
 internal/safego/       Panic isolation for per-datagram handlers
 internal/watchdog/     sd_notify READY/WATCHDOG
 internal/testkit/      Soak-duration helper shared by test suites
@@ -72,6 +74,11 @@ scripts/               bacpypes3 peer provisioning and interop drivers
 ```
 
 ### Data path
+
+Each `devices:` entry builds its own `Gateway` (its own client socket, device
+socket, policy, pending table, replay cache and COV table). A `Runner` merely
+starts every gateway and stops them together; it never moves a datagram between
+them. Inside one gateway:
 
 1. `clientLoop` reads a datagram, applies `Policy.Check` (ACL first, then the
    per-client rate limit, then the shared device budget; an off-list source
@@ -94,7 +101,7 @@ scripts/               bacpypes3 peer provisioning and interop drivers
 5. The sweeper expires pending requests, replay entries, device exchanges,
    COV subscriptions and idle clients once per second.
 
-### State tables (all bounded)
+### State tables (all bounded, one set per device)
 
 | Table | Key | Bound / lifetime |
 |---|---|---|
@@ -111,8 +118,9 @@ scripts/               bacpypes3 peer provisioning and interop drivers
 - BVLC length includes the 4-byte header. Only `0x0A` (Original-Unicast) and
   `0x0B` (Original-Broadcast) are accepted from a client; other functions are
   counted unsupported.
-- A client broadcast is forwarded to the one device as **unicast**. The proxy
-  has exactly one device, so a broadcast is a discovery request aimed at it.
+- A client broadcast is forwarded to **that listener's device** as unicast. Each
+  listener has exactly one device, so a broadcast is a discovery request aimed
+  at it; it is never routed to another co-hosted device.
 - NPDU routing fields (DNET/SNET/hop count) are stripped on the way to the
   device and never invented on the way back.
 - APDU invoke ID is at octet 2 for a confirmed request and octet 1 for every
@@ -148,24 +156,32 @@ Commands: `gateway`, `validate [--json]`, `selftest [--json]
 [--probe=false]`, `version`, `help`.
 
 Every command accepts either `--config <file>` or the gateway flags. Flags
-mode is for a two-line paste install; YAML mode is the appliance shape. Both
-compile to the same `config.Config`, so validation and the daemon cannot
-drift.
+mode is for a two-line paste install and always builds exactly one device;
+YAML mode is the appliance shape and may list several. Both compile to the same
+`config.Config`, so validation and the daemon cannot drift.
 
-Reloadable on `SIGHUP`: `access.allow`, `access.sc_allow`,
-`access.rate_per_sec`, `access.device_rate_per_sec`, `access.read_only`,
-`access.write_policy`.
+A YAML file has process-wide `log_level`, `metrics`, `audit`, and a `devices:`
+list. Each entry carries its own `listen_addr`, `device_addr`,
+`device_local_addr`, `device_instance`, `request_timeout_secs`, `max_pending`,
+`access` block and optional `sc` block. `name` (default: `device_addr`) labels
+the device in logs, metrics and the audit, and is the reload match key; it and
+`listen_addr` and `sc.vmac` must be unique across the process.
 
-Restart-only (reported, never silently ignored): `listen_addr`,
-`device_addr`, `device_local_addr`, `device_instance`,
+Reloadable on `SIGHUP` (per device, matched by `name`): `access.allow`,
+`access.sc_allow`, `access.rate_per_sec`, `access.device_rate_per_sec`,
+`access.read_only`, `access.write_policy`.
+
+Restart-only (reported, never silently ignored): adding or removing a device,
+and `listen_addr`, `device_addr`, `device_local_addr`, `device_instance`,
 `request_timeout_secs`, `max_pending`, `log_level`, `metrics.addr`, `audit.*`,
 and the whole `sc` block (`vmac`, `uuid`, `hubs`, `ca_file`, `cert_file`,
 `key_file`).
 
-The SC leg is configured either as an `sc:` YAML block or with
+The SC leg is configured per device, either as an `sc:` YAML block or with
 `--sc-vmac/--sc-uuid/--sc-hub/--sc-ca/--sc-cert/--sc-key`; `sc_allow` is
-`--sc-allow`. A partially configured block is a validation error, never a
-silently disabled leg.
+`--sc-allow`. Each device with an `sc` block is its own SC node (its own
+VMAC/UUID), so give each a distinct VMAC. A partially configured block is a
+validation error, never a silently disabled leg.
 
 A reload with an invalid file or policy logs an error and keeps the running
 configuration. In flags mode a SIGHUP is ignored with a warning: there is no
@@ -267,6 +283,15 @@ Done in v1:
   state handler, exposed as the `bacnet_shield_sc_connected` gauge and
   `bacnet_shield_sc_reconnects_total` counter, so a hub outage is visible on
   `/metrics`. `make interop-sc` scrapes both across a hub restart.
+- Multi-device co-hosting: a `devices:` list builds one `Gateway` per
+  listener↔device pair (own sockets, policy, pending/replay/COV tables), a
+  `Runner` serves them together, and a shared registry carries a per-device
+  `device` label on every counter and gauge. Each entry has its own access
+  policy and optional SC node. `SIGHUP` reloads every device's policy, matched
+  by `name`; adding/removing a device and any socket/SC change is a
+  restart-only warning. `TestMultiDeviceCoHosting` proves each listener reaches
+  its own device, policies do not cross, and both device labels appear on one
+  scrape; `TestBuildDevicesPortConflict` proves a bind conflict fails startup.
 
 Known boundaries:
 
@@ -276,7 +301,8 @@ Known boundaries:
   rather than pretending to enforce it.
 - No SC hub role and no SC direct (node-to-node) connections; the proxy is
   always a WebSocket client of a hub.
-- No BBMD/router; one device per instance.
+- No BBMD/router and no traffic between co-hosted devices; each entry is an
+  isolated listener↔device pair.
 - Segmented writes are refused; SubscribeCOVPropertyMultiple is refused.
 - The proxy does not reassemble segmented payloads; it tracks and relays them.
 - `ListenAddr` on macOS cannot use `127.0.0.2`/`127.0.0.3`; tests use separate

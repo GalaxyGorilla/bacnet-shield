@@ -18,21 +18,53 @@ func decode(t *testing.T, yaml string) (*Config, error) {
 	return Decode(strings.NewReader(yaml))
 }
 
+// oneDevice wraps a single device entry in the devices: list the multi-device
+// config now uses, so the field-level rejection cases stay one entry. The
+// first line becomes the list item and every following line is shifted under
+// it, preserving the block's own indentation. A listen_addr is injected when
+// the entry does not set one, so a case that means to test another field is
+// not rejected for a missing listener first.
+func oneDevice(entry string) string {
+	entry = strings.TrimRight(entry, "\n")
+	if !strings.Contains(entry, "listen_addr:") {
+		entry = "listen_addr: 127.0.0.1:47808\n" + entry
+	}
+	var b strings.Builder
+	b.WriteString("devices:\n")
+	for i, line := range strings.Split(entry, "\n") {
+		if i == 0 {
+			b.WriteString("  - " + line + "\n")
+			continue
+		}
+		b.WriteString("    " + line + "\n")
+	}
+	return b.String()
+}
+
 func TestDecodeDefaults(t *testing.T) {
-	c, err := decode(t, "device_addr: 192.0.2.10:47808\n")
+	c, err := decode(t, oneDevice("device_addr: 192.0.2.10:47808\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ListenAddr != ":47808" {
-		t.Fatalf("listen_addr = %q", c.ListenAddr)
+	if len(c.Devices) != 1 {
+		t.Fatalf("devices = %d", len(c.Devices))
 	}
-	if c.RequestTimeoutSecs != 30 || c.MaxPending != 256 || c.LogLevel != "info" {
+	d := c.Devices[0]
+	if d.ListenAddr != "127.0.0.1:47808" {
+		t.Fatalf("listen_addr = %q", d.ListenAddr)
+	}
+	if d.RequestTimeoutSecs != 30 || d.MaxPending != 256 || c.LogLevel != "info" {
 		t.Fatalf("defaults not applied: %+v", c)
 	}
-	if c.DeviceInstance != nil {
+	if d.DeviceInstance != nil {
 		t.Fatal("device_instance defaulted to a value")
 	}
-	pol, err := c.AccessPolicy()
+	// An omitted name falls back to the device address, so every log, metric
+	// and audit record can name the device.
+	if d.Name != "192.0.2.10:47808" {
+		t.Fatalf("name = %q", d.Name)
+	}
+	pol, err := d.AccessPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,24 +76,26 @@ func TestDecodeDefaults(t *testing.T) {
 
 func TestDecodeFull(t *testing.T) {
 	c, err := decode(t, `
-listen_addr: 0.0.0.0:47808
-device_addr: 192.0.2.10:47808
-device_local_addr: 192.0.2.1:47808
-device_instance: 1001
-request_timeout_secs: 12
-max_pending: 64
+devices:
+  - name: boiler
+    listen_addr: 0.0.0.0:47808
+    device_addr: 192.0.2.10:47808
+    device_local_addr: 192.0.2.1:47808
+    device_instance: 1001
+    request_timeout_secs: 12
+    max_pending: 64
+    access:
+      allow: ["10.0.0.0/8", "192.0.2.7"]
+      rate_per_sec: 25
+      device_rate_per_sec: 20
+      write_policy:
+        default: deny
+        rules:
+          - oid: "analog-value:5:present-value"
+            action: allow
+          - oid: "device:*:description"
+            action: deny
 log_level: debug
-access:
-  allow: ["10.0.0.0/8", "192.0.2.7"]
-  rate_per_sec: 25
-  device_rate_per_sec: 20
-  write_policy:
-    default: deny
-    rules:
-      - oid: "analog-value:5:present-value"
-        action: allow
-      - oid: "device:*:description"
-        action: deny
 metrics:
   addr: 127.0.0.1:9090
 audit:
@@ -71,17 +105,21 @@ audit:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.DeviceInstance == nil || *c.DeviceInstance != 1001 {
-		t.Fatalf("device_instance = %v", c.DeviceInstance)
+	d := c.Devices[0]
+	if d.Name != "boiler" {
+		t.Fatalf("name = %q", d.Name)
 	}
-	if c.RequestTimeoutSecs != 12 || c.MaxPending != 64 || c.LogLevel != "debug" {
+	if d.DeviceInstance == nil || *d.DeviceInstance != 1001 {
+		t.Fatalf("device_instance = %v", d.DeviceInstance)
+	}
+	if d.RequestTimeoutSecs != 12 || d.MaxPending != 64 || c.LogLevel != "debug" {
 		t.Fatalf("config = %+v", c)
 	}
-	if len(c.Access.Allow) != 2 || c.Access.RatePerSec != 25 || c.Access.DeviceRatePerSec != 20 {
-		t.Fatalf("access = %+v", c.Access)
+	if len(d.Access.Allow) != 2 || d.Access.RatePerSec != 25 || d.Access.DeviceRatePerSec != 20 {
+		t.Fatalf("access = %+v", d.Access)
 	}
-	if c.Access.WritePolicy == nil || len(c.Access.WritePolicy.Rules) != 2 {
-		t.Fatalf("write policy = %+v", c.Access.WritePolicy)
+	if d.Access.WritePolicy == nil || len(d.Access.WritePolicy.Rules) != 2 {
+		t.Fatalf("write policy = %+v", d.Access.WritePolicy)
 	}
 	if c.Metrics.Addr != "127.0.0.1:9090" {
 		t.Fatalf("metrics = %+v", c.Metrics)
@@ -91,34 +129,93 @@ audit:
 	}
 }
 
-func TestDecodeSC(t *testing.T) {
+// TestDecodeMultipleDevices: two co-hosted devices each carry their own policy
+// and SC identity, and one device's policy never leaks into the other's.
+func TestDecodeMultipleDevices(t *testing.T) {
 	c, err := decode(t, `
-device_addr: 192.0.2.10:47808
-sc:
-  vmac: "02:00:00:00:00:01"
-  uuid: "00112233-4455-6677-8899-aabbccddeeff"
-  hubs:
-    - wss://hub1.example:47808/
-    - wss://hub2.example:47808/
-  ca_file: /etc/bacnet-shield/hub-ca.pem
-  cert_file: /etc/bacnet-shield/node.pem
-  key_file: /etc/bacnet-shield/node.key
-access:
-  sc_allow: ["02:00:00:00:00:0a", "02:00:00:00:00:0b"]
+devices:
+  - name: boiler
+    listen_addr: 192.0.2.10:47808
+    device_addr: 10.0.0.42:47808
+    access:
+      read_only: true
+  - name: ahu
+    listen_addr: 192.0.2.11:47808
+    device_addr: 10.0.0.43:47808
+    access:
+      allow: ["192.0.2.0/24"]
+      write_policy:
+        default: deny
+        rules:
+          - {oid: "analog-value:1:present-value", action: allow}
+    sc:
+      vmac: "02:00:00:00:00:02"
+      uuid: "00112233-4455-6677-8899-aabbccddeeff"
+      hubs: [wss://hub.example/]
 `)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.SC.Enabled() {
+	if len(c.Devices) != 2 {
+		t.Fatalf("devices = %d", len(c.Devices))
+	}
+
+	boiler := &c.Devices[0]
+	ahu := &c.Devices[1]
+
+	bp, err := boiler.AccessPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := bacnet.APDU{Type: bacnet.PDUConfirmedRequest, HasService: true, Service: bacnet.ServiceWriteProperty}
+	if bp.AllowWrite(w) {
+		t.Fatal("boiler is read-only but allowed a write")
+	}
+
+	// The ahu's allow must not have leaked into the boiler's policy, and vice
+	// versa: the ahu is not read-only.
+	if len(ahu.Access.Allow) != 1 || ahu.Access.ReadOnly {
+		t.Fatalf("ahu access = %+v", ahu.Access)
+	}
+	if !ahu.SC.Enabled() || ahu.SC.VMAC != "02:00:00:00:00:02" {
+		t.Fatalf("ahu sc = %+v", ahu.SC)
+	}
+	if boiler.SC.Enabled() {
+		t.Fatal("boiler inherited an SC block")
+	}
+}
+
+func TestDecodeSC(t *testing.T) {
+	c, err := decode(t, `
+devices:
+  - listen_addr: 127.0.0.1:47808
+    device_addr: 192.0.2.10:47808
+    sc:
+      vmac: "02:00:00:00:00:01"
+      uuid: "00112233-4455-6677-8899-aabbccddeeff"
+      hubs:
+        - wss://hub1.example:47808/
+        - wss://hub2.example:47808/
+      ca_file: /etc/bacnet-shield/hub-ca.pem
+      cert_file: /etc/bacnet-shield/node.pem
+      key_file: /etc/bacnet-shield/node.key
+    access:
+      sc_allow: ["02:00:00:00:00:0a", "02:00:00:00:00:0b"]
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &c.Devices[0]
+	if !d.SC.Enabled() {
 		t.Fatal("SC block not recognized as enabled")
 	}
-	if c.SC.VMAC != "02:00:00:00:00:01" || len(c.SC.Hubs) != 2 {
-		t.Fatalf("sc = %+v", c.SC)
+	if d.SC.VMAC != "02:00:00:00:00:01" || len(d.SC.Hubs) != 2 {
+		t.Fatalf("sc = %+v", d.SC)
 	}
-	if len(c.Access.SCAllow) != 2 {
-		t.Fatalf("sc_allow = %v", c.Access.SCAllow)
+	if len(d.Access.SCAllow) != 2 {
+		t.Fatalf("sc_allow = %v", d.Access.SCAllow)
 	}
-	pol, err := c.AccessPolicy()
+	pol, err := d.AccessPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,11 +229,11 @@ access:
 	}
 
 	// An empty block leaves the SC leg off.
-	off, err := decode(t, "device_addr: 192.0.2.10:47808\n")
+	off, err := decode(t, oneDevice("device_addr: 192.0.2.10:47808\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if off.SC.Enabled() {
+	if off.Devices[0].SC.Enabled() {
 		t.Fatal("empty sc block reported enabled")
 	}
 }
@@ -150,8 +247,12 @@ func polWithSC(t *testing.T, pol *access.Policy, vmac sc.MAC) bool {
 
 func TestDecodeUnknownKeyFails(t *testing.T) {
 	// A misspelled read_only must not silently produce a writable proxy.
-	if _, err := decode(t, "device_addr: 192.0.2.10:47808\naccess:\n  read_onyl: true\n"); err == nil {
+	if _, err := decode(t, oneDevice("device_addr: 192.0.2.10:47808\naccess:\n  read_onyl: true\n")); err == nil {
 		t.Fatal("unknown key accepted")
+	}
+	// A misspelled device key must fail too, now that devices are entries.
+	if _, err := decode(t, "devices:\n  - device_addr: 192.0.2.10:47808\n    device_addrx: x\n"); err == nil {
+		t.Fatal("unknown device key accepted")
 	}
 }
 
@@ -160,35 +261,41 @@ func TestValidateRejections(t *testing.T) {
 		name string
 		yaml string
 	}{
-		{"missing device", "listen_addr: :47808\n"},
-		{"bad listen", "device_addr: 192.0.2.10:47808\nlisten_addr: nope\n"},
-		{"same legs", "device_addr: :47808\nlisten_addr: :47808\n"},
-		{"bad device port", "device_addr: 192.0.2.10:99999\n"},
-		{"instance too large", "device_addr: 192.0.2.10:47808\ndevice_instance: 4194304\n"},
-		{"timeout zero", "device_addr: 192.0.2.10:47808\nrequest_timeout_secs: 0\n"},
-		{"timeout huge", "device_addr: 192.0.2.10:47808\nrequest_timeout_secs: 601\n"},
-		{"max pending zero", "device_addr: 192.0.2.10:47808\nmax_pending: 0\n"},
-		{"max pending over 256", "device_addr: 192.0.2.10:47808\nmax_pending: 257\n"},
-		{"bad log level", "device_addr: 192.0.2.10:47808\nlog_level: loud\n"},
-		{"bad metrics addr", "device_addr: 192.0.2.10:47808\nmetrics:\n  addr: nope\n"},
-		{"audit max_mb zero", "device_addr: 192.0.2.10:47808\naudit:\n  file: /tmp/a.log\n  max_mb: 0\n"},
-		{"audit max_mb huge", "device_addr: 192.0.2.10:47808\naudit:\n  max_mb: 20000\n"},
-		{"read only and write policy", "device_addr: 192.0.2.10:47808\naccess:\n  read_only: true\n  write_policy:\n    default: deny\n"},
-		{"write policy without default", "device_addr: 192.0.2.10:47808\naccess:\n  write_policy:\n    rules:\n      - {oid: \"*\", action: allow}\n"},
-		{"write policy bad default", "device_addr: 192.0.2.10:47808\naccess:\n  write_policy:\n    default: maybe\n"},
-		{"bad allow entry", "device_addr: 192.0.2.10:47808\naccess:\n  allow: [\"not-an-ip\"]\n"},
-		{"bad rule", "device_addr: 192.0.2.10:47808\naccess:\n  write_policy:\n    default: deny\n    rules:\n      - {oid: \"nope\", action: allow}\n"},
-		{"sc missing uuid", "device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  hubs: [wss://hub/]\n"},
-		{"sc missing hubs", "device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n"},
-		{"sc zero vmac", "device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"00:00:00:00:00:00\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [wss://hub/]\n"},
-		{"sc broadcast vmac", "device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"ff:ff:ff:ff:ff:ff\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [wss://hub/]\n"},
-		{"sc bad vmac", "device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"not-a-mac\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [wss://hub/]\n"},
-		{"sc bad uuid", "device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  uuid: \"nope\"\n  hubs: [wss://hub/]\n"},
-		{"sc insecure hub", "device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [ws://hub/]\n"},
-		{"sc bad hub scheme", "device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [https://hub/]\n"},
-		{"sc cert without key", "device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [wss://hub/]\n  cert_file: /tmp/node.pem\n"},
-		{"sc key without cert", "device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [wss://hub/]\n  key_file: /tmp/node.key\n"},
-		{"sc bad allow entry", "device_addr: 192.0.2.10:47808\naccess:\n  sc_allow: [\"not-a-mac\"]\n"},
+		{"no devices", "log_level: info\n"},
+		{"empty devices list", "devices: []\n"},
+		{"missing device addr", oneDevice("listen_addr: :47808\n")},
+		{"missing listen", oneDevice("device_addr: 192.0.2.10:47808\nlisten_addr: \"\"\n")},
+		{"bad listen", oneDevice("device_addr: 192.0.2.10:47808\nlisten_addr: nope\n")},
+		{"same legs", oneDevice("device_addr: :47808\nlisten_addr: :47808\n")},
+		{"bad device port", oneDevice("device_addr: 192.0.2.10:99999\n")},
+		{"instance too large", oneDevice("device_addr: 192.0.2.10:47808\ndevice_instance: 4194304\n")},
+		{"timeout zero", oneDevice("device_addr: 192.0.2.10:47808\nrequest_timeout_secs: -1\n")},
+		{"timeout huge", oneDevice("device_addr: 192.0.2.10:47808\nrequest_timeout_secs: 601\n")},
+		{"max pending over 256", oneDevice("device_addr: 192.0.2.10:47808\nmax_pending: 257\n")},
+		{"bad log level", oneDevice("device_addr: 192.0.2.10:47808\n") + "log_level: loud\n"},
+		{"bad metrics addr", oneDevice("device_addr: 192.0.2.10:47808\n") + "metrics:\n  addr: nope\n"},
+		{"audit max_mb zero", oneDevice("device_addr: 192.0.2.10:47808\n") + "audit:\n  file: /tmp/a.log\n  max_mb: 0\n"},
+		{"audit max_mb huge", oneDevice("device_addr: 192.0.2.10:47808\n") + "audit:\n  max_mb: 20000\n"},
+		{"read only and write policy", oneDevice("device_addr: 192.0.2.10:47808\naccess:\n  read_only: true\n  write_policy:\n    default: deny\n")},
+		{"write policy without default", oneDevice("device_addr: 192.0.2.10:47808\naccess:\n  write_policy:\n    rules:\n      - {oid: \"*\", action: allow}\n")},
+		{"write policy bad default", oneDevice("device_addr: 192.0.2.10:47808\naccess:\n  write_policy:\n    default: maybe\n")},
+		{"bad allow entry", oneDevice("device_addr: 192.0.2.10:47808\naccess:\n  allow: [\"not-an-ip\"]\n")},
+		{"bad rule", oneDevice("device_addr: 192.0.2.10:47808\naccess:\n  write_policy:\n    default: deny\n    rules:\n      - {oid: \"nope\", action: allow}\n")},
+		{"sc missing uuid", oneDevice("device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  hubs: [wss://hub/]\n")},
+		{"sc missing hubs", oneDevice("device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n")},
+		{"sc zero vmac", oneDevice("device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"00:00:00:00:00:00\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [wss://hub/]\n")},
+		{"sc broadcast vmac", oneDevice("device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"ff:ff:ff:ff:ff:ff\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [wss://hub/]\n")},
+		{"sc bad vmac", oneDevice("device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"not-a-mac\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [wss://hub/]\n")},
+		{"sc bad uuid", oneDevice("device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  uuid: \"nope\"\n  hubs: [wss://hub/]\n")},
+		{"sc insecure hub", oneDevice("device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [ws://hub/]\n")},
+		{"sc bad hub scheme", oneDevice("device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [https://hub/]\n")},
+		{"sc cert without key", oneDevice("device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [wss://hub/]\n  cert_file: /tmp/node.pem\n")},
+		{"sc key without cert", oneDevice("device_addr: 192.0.2.10:47808\nsc:\n  vmac: \"02:00:00:00:00:01\"\n  uuid: \"00112233-4455-6677-8899-aabbccddeeff\"\n  hubs: [wss://hub/]\n  key_file: /tmp/node.key\n")},
+		{"sc bad allow entry", oneDevice("device_addr: 192.0.2.10:47808\naccess:\n  sc_allow: [\"not-a-mac\"]\n")},
+		{"duplicate listen", "devices:\n  - {name: a, listen_addr: 192.0.2.10:47808, device_addr: 10.0.0.1:47808}\n  - {name: b, listen_addr: 192.0.2.10:47808, device_addr: 10.0.0.2:47808}\n"},
+		{"duplicate name", "devices:\n  - {name: a, listen_addr: 192.0.2.10:47808, device_addr: 10.0.0.1:47808}\n  - {name: a, listen_addr: 192.0.2.11:47808, device_addr: 10.0.0.2:47808}\n"},
+		{"duplicate vmac", "devices:\n  - {name: a, listen_addr: 192.0.2.10:47808, device_addr: 10.0.0.1:47808, sc: {vmac: \"02:00:00:00:00:01\", uuid: \"00112233-4455-6677-8899-aabbccddeeff\", hubs: [wss://hub/]}}\n  - {name: b, listen_addr: 192.0.2.11:47808, device_addr: 10.0.0.2:47808, sc: {vmac: \"02:00:00:00:00:01\", uuid: \"00112233-4455-6677-8899-aabbccddeeff\", hubs: [wss://hub/]}}\n"},
+		{"duplicate vmac case-insensitive", "devices:\n  - {name: a, listen_addr: 192.0.2.10:47808, device_addr: 10.0.0.1:47808, sc: {vmac: \"02:00:00:00:00:0A\", uuid: \"00112233-4455-6677-8899-aabbccddeeff\", hubs: [wss://hub/]}}\n  - {name: b, listen_addr: 192.0.2.11:47808, device_addr: 10.0.0.2:47808, sc: {vmac: \"02:00:00:00:00:0a\", uuid: \"00112233-4455-6677-8899-aabbccddeeff\", hubs: [wss://hub/]}}\n"},
 	}
 	for _, c := range cases {
 		if _, err := decode(t, c.yaml); err == nil {
@@ -231,25 +338,32 @@ func TestFlagsBuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.DeviceAddr != "192.0.2.10:47808" || c.DeviceInstance == nil || *c.DeviceInstance != 1001 {
+	if len(c.Devices) != 1 {
+		t.Fatalf("flags mode built %d devices", len(c.Devices))
+	}
+	d := c.Devices[0]
+	if d.DeviceAddr != "192.0.2.10:47808" || d.DeviceInstance == nil || *d.DeviceInstance != 1001 {
+		t.Fatalf("device = %+v", d)
+	}
+	if d.Name != "192.0.2.10:47808" {
+		t.Fatalf("flags device name = %q", d.Name)
+	}
+	if d.RequestTimeoutSecs != 9 || d.MaxPending != 32 || c.LogLevel != "warn" {
 		t.Fatalf("config = %+v", c)
 	}
-	if c.RequestTimeoutSecs != 9 || c.MaxPending != 32 || c.LogLevel != "warn" {
-		t.Fatalf("config = %+v", c)
+	if len(d.Access.Allow) != 2 || d.Access.RatePerSec != 12.5 || d.Access.DeviceRatePerSec != 8 {
+		t.Fatalf("access = %+v", d.Access)
 	}
-	if len(c.Access.Allow) != 2 || c.Access.RatePerSec != 12.5 || c.Access.DeviceRatePerSec != 8 {
-		t.Fatalf("access = %+v", c.Access)
+	if d.Access.WritePolicy == nil || len(d.Access.WritePolicy.Rules) != 2 ||
+		d.Access.WritePolicy.Rules[0].Action != "allow" || d.Access.WritePolicy.Rules[1].Action != "deny" {
+		t.Fatalf("write policy = %+v", d.Access.WritePolicy)
 	}
-	if c.Access.WritePolicy == nil || len(c.Access.WritePolicy.Rules) != 2 ||
-		c.Access.WritePolicy.Rules[0].Action != "allow" || c.Access.WritePolicy.Rules[1].Action != "deny" {
-		t.Fatalf("write policy = %+v", c.Access.WritePolicy)
+	if !d.SC.Enabled() || d.SC.VMAC != "02:00:00:00:00:01" ||
+		len(d.SC.Hubs) != 2 || d.SC.CAFile != "/tmp/hub-ca.pem" {
+		t.Fatalf("sc = %+v", d.SC)
 	}
-	if !c.SC.Enabled() || c.SC.VMAC != "02:00:00:00:00:01" ||
-		len(c.SC.Hubs) != 2 || c.SC.CAFile != "/tmp/hub-ca.pem" {
-		t.Fatalf("sc = %+v", c.SC)
-	}
-	if len(c.Access.SCAllow) != 1 {
-		t.Fatalf("sc_allow = %v", c.Access.SCAllow)
+	if len(d.Access.SCAllow) != 1 {
+		t.Fatalf("sc_allow = %v", d.Access.SCAllow)
 	}
 	if c.Audit.File != "/tmp/audit.jsonl" || c.Audit.MaxMB != 16 {
 		t.Fatalf("audit = %+v", c.Audit)
@@ -276,15 +390,11 @@ func TestFlagsBuildRejections(t *testing.T) {
 }
 
 func TestAccessPolicySemantics(t *testing.T) {
-	c, err := decode(t, `
-device_addr: 192.0.2.10:47808
-access:
-  read_only: true
-`)
+	c, err := decode(t, oneDevice("device_addr: 192.0.2.10:47808\naccess:\n  read_only: true\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	pol, err := c.AccessPolicy()
+	pol, err := c.Devices[0].AccessPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,18 +404,11 @@ access:
 		t.Fatal("read_only policy allowed a write")
 	}
 
-	c, err = decode(t, `
-device_addr: 192.0.2.10:47808
-access:
-  write_policy:
-    default: deny
-    rules:
-      - {oid: "analog-value:5:present-value", action: allow}
-`)
+	c, err = decode(t, oneDevice("device_addr: 192.0.2.10:47808\naccess:\n  write_policy:\n    default: deny\n    rules:\n      - {oid: \"analog-value:5:present-value\", action: allow}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	pol, err = c.AccessPolicy()
+	pol, err = c.Devices[0].AccessPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,15 +423,11 @@ access:
 }
 
 func TestAccessPolicyDeviceBudget(t *testing.T) {
-	c, err := decode(t, `
-device_addr: 192.0.2.10:47808
-access:
-  device_rate_per_sec: 1
-`)
+	c, err := decode(t, oneDevice("device_addr: 192.0.2.10:47808\naccess:\n  device_rate_per_sec: 1\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	pol, err := c.AccessPolicy()
+	pol, err := c.Devices[0].AccessPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,15 +443,19 @@ access:
 }
 
 func TestDeviceObjectID(t *testing.T) {
-	c, err := decode(t, "device_addr: 192.0.2.10:47808\ndevice_instance: 1001\n")
+	c, err := decode(t, oneDevice("device_addr: 192.0.2.10:47808\ndevice_instance: 1001\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	oid, ok := c.DeviceObjectID()
+	oid, ok := c.Devices[0].DeviceObjectID()
 	if !ok || oid.Type != bacnet.ObjectDevice || oid.Instance != 1001 {
 		t.Fatalf("object id = %v, %v", oid, ok)
 	}
-	if _, ok := Defaults().DeviceObjectID(); ok {
+	off, err := decode(t, oneDevice("device_addr: 192.0.2.10:47808\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := off.Devices[0].DeviceObjectID(); ok {
 		t.Fatal("unset instance produced an object id")
 	}
 }

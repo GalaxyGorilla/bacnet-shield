@@ -19,6 +19,7 @@ import (
 type AuditEvent struct {
 	Time    string   `json:"time"`
 	Event   string   `json:"event"`
+	Device  string   `json:"device"`
 	Leg     string   `json:"leg"`
 	Client  string   `json:"client"`
 	Service string   `json:"service,omitempty"`

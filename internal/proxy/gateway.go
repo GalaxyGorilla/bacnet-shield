@@ -62,6 +62,9 @@ type Config struct {
 	// DeviceInstance optionally pins the expected device instance. It never
 	// gates traffic; a mismatch is a warning (and a selftest failure).
 	DeviceInstance *uint32
+	// DeviceName labels the device in logs, metrics and audit records. It is
+	// the config entry's `name` (or its device address).
+	DeviceName string
 	// Audit, when non-nil, receives one structured record per security
 	// decision. A nil audit records nothing.
 	Audit *observ.Audit
@@ -101,6 +104,7 @@ const (
 // Gateway is one running proxy instance.
 type Gateway struct {
 	cfg     Config
+	name    string
 	log     *zap.Logger
 	metrics *observ.Metrics
 	audit   *observ.Audit
@@ -173,6 +177,7 @@ func New(cfg Config, pol *access.Policy, log *zap.Logger, m *observ.Metrics) (*G
 	}
 	g := &Gateway{
 		cfg:        cfg,
+		name:       cfg.DeviceName,
 		log:        log,
 		metrics:    m,
 		audit:      cfg.Audit,
@@ -202,6 +207,9 @@ func (g *Gateway) ClientAddr() *net.UDPAddr {
 func (g *Gateway) DeviceLocalAddr() *net.UDPAddr {
 	return g.deviceConn.LocalAddr().(*net.UDPAddr)
 }
+
+// Name is the device label (the config entry's name, or its device address).
+func (g *Gateway) Name() string { return g.name }
 
 // SetPolicy swaps the front-leg policy. It is safe while Serve is running;
 // a SIGHUP reload uses it.

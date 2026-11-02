@@ -74,35 +74,40 @@ func Register(fs *pflag.FlagSet) *Options {
 	return o
 }
 
-// Build validates the flag values into a Config.
+// Build validates the flag values into a Config with exactly one device. Flags
+// mode is the two-line paste install; several co-hosted devices need a file.
 func (o *Options) Build() (*Config, error) {
 	c := Defaults()
-	c.ListenAddr = o.ListenAddr
-	c.DeviceAddr = o.DeviceAddr
-	c.DeviceLocalAddr = o.DeviceLocalAddr
-	c.RequestTimeoutSecs = o.RequestTimeout
-	c.MaxPending = o.MaxPending
 	c.LogLevel = o.LogLevel
 	c.Metrics.Addr = o.MetricsAddr
 	c.Audit = Audit{File: o.AuditFile, MaxMB: o.AuditMaxMB}
+
+	d := Device{
+		Name:               o.DeviceAddr,
+		ListenAddr:         o.ListenAddr,
+		DeviceAddr:         o.DeviceAddr,
+		DeviceLocalAddr:    o.DeviceLocalAddr,
+		RequestTimeoutSecs: o.RequestTimeout,
+		MaxPending:         o.MaxPending,
+		Access: Access{
+			Allow:            o.Allow,
+			SCAllow:          o.SCAllow,
+			RatePerSec:       o.RatePerSec,
+			DeviceRatePerSec: o.DeviceRatePerSec,
+			ReadOnly:         o.ReadOnly,
+		},
+		SC: SC{
+			VMAC:     o.SCVMAC,
+			UUID:     o.SCUUID,
+			Hubs:     o.SCHubs,
+			CAFile:   o.SCCAFile,
+			CertFile: o.SCCertFile,
+			KeyFile:  o.SCKeyFile,
+		},
+	}
 	if o.DeviceInstance >= 0 {
 		v := uint32(o.DeviceInstance)
-		c.DeviceInstance = &v
-	}
-	c.Access = Access{
-		Allow:            o.Allow,
-		SCAllow:          o.SCAllow,
-		RatePerSec:       o.RatePerSec,
-		DeviceRatePerSec: o.DeviceRatePerSec,
-		ReadOnly:         o.ReadOnly,
-	}
-	c.SC = SC{
-		VMAC:     o.SCVMAC,
-		UUID:     o.SCUUID,
-		Hubs:     o.SCHubs,
-		CAFile:   o.SCCAFile,
-		CertFile: o.SCCertFile,
-		KeyFile:  o.SCKeyFile,
+		d.DeviceInstance = &v
 	}
 	if o.WriteDefault != "" || len(o.WriteAllow) > 0 || len(o.WriteDeny) > 0 {
 		if o.WriteDefault == "" {
@@ -115,8 +120,9 @@ func (o *Options) Build() (*Config, error) {
 		for _, spec := range o.WriteDeny {
 			wp.Rules = append(wp.Rules, WriteRule{OID: spec, Action: "deny"})
 		}
-		c.Access.WritePolicy = wp
+		d.Access.WritePolicy = wp
 	}
+	c.Devices = []Device{d}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}

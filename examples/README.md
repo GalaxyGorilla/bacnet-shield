@@ -13,6 +13,11 @@ BACnet background section, so no prior BACnet knowledge is needed.
 | [sc.md](sc.md) | Your clients speak BACnet/SC, or a site hub already exists, and you want the secure leg in front of the same device |
 | [operations.md](operations.md) | The box is deployed — day-2: install as a service, commission, monitor, reload the policy in place, troubleshoot |
 
+To protect **several devices with one process**, add more entries to the
+`devices:` list: each is an independent listener↔device pair with its own local
+IP, access policy and optional SC node. This is co-hosting, not routing — see
+[the deployment shape](../README.md#deployment-shape).
+
 The reference documents live next to the source:
 [README](../README.md) for the full surface, [SECURITY.md](../SECURITY.md) for
 the threat model and trust boundaries, [TESTING.md](../TESTING.md) for the test

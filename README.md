@@ -3,9 +3,10 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/GalaxyGorilla/bacnet-shield.svg)](https://pkg.go.dev/github.com/GalaxyGorilla/bacnet-shield)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
-A **BACnet/IP security proxy** for one legacy building device. One static
-binary. The device keeps speaking plain BACnet/IP; the proxy does all the
-shielding work between it and the building's clients.
+A **BACnet/IP security proxy** for legacy building devices. One static binary.
+The devices keep speaking plain BACnet/IP; the proxy does all the shielding
+work between them and the building's clients. One process can protect several
+devices as independent listener↔device pairs — co-hosting, not routing.
 
 **Status:** production-ready for the documented v1 software scope. The protocol
 codecs are fuzzed, the data plane is race-tested, and independent stacks drive
@@ -143,17 +144,41 @@ appliance; appliance-level orchestration remains outside this repository.
 | [SC front leg](examples/sc.md) | Clients or a head-end speak BACnet/SC | The proxy joins an existing hub as a node; the device stays plain IP |
 | [Operations](examples/operations.md) | The box is deployed | Install as a service, commission, monitor, reload, troubleshoot |
 
+**Several devices, one process.** A `devices:` list co-hosts several
+listener↔device pairs in one binary, one config file and one metrics endpoint.
+Each entry has its own front-leg policy and optional SC node; a client reaches
+a device only through that device's listener. This is not a router: there is no
+BBMD, no foreign-device registration and no traffic between devices. Give each
+device its own local IP on the standard port 47808, so a client's broadcast
+Who-Is still reaches the whole building:
+
+```yaml
+devices:
+  - name: boiler
+    listen_addr: 10.0.0.10:47808
+    device_addr: 10.0.0.42:47808
+    access: { read_only: true }
+  - name: ahu
+    listen_addr: 10.0.0.11:47808
+    device_addr: 10.0.0.43:47808
+    access:
+      write_policy:
+        default: deny
+        rules: [{ oid: "analog-value:*:present-value", action: allow }]
+```
+
 Planned work and explicit non-goals are recorded in [BACKLOG.md](BACKLOG.md):
-multi-device instances, a BBMD/router role, segmented-write decoding and
-UUID-keyed SC admission are deliberately out of the v1 scope.
+a BBMD/router role, segmented-write decoding and UUID-keyed SC admission are
+deliberately out of the v1 scope.
 
 ## Scope
 
-This is a **single-device gateway**, not a BACnet device stack and not a router.
+This is a **co-hosting gateway**: one or more independent listener↔device
+pairs in one process, not a BACnet device stack and not a router.
 
 | Supported | Deliberately not supported (v1) |
 |---|---|
-| One legacy BACnet/IP device per instance | BBMD, foreign-device registration, routing between networks |
+| One or more co-hosted legacy BACnet/IP devices per instance | BBMD, foreign-device registration, routing between networks |
 | BACnet/IP clients, unicast and broadcast | A BACnet/SC **hub**: the proxy is a node, not a hub |
 | BACnet/SC clients through an existing hub | SC direct (node-to-node) connections |
 | Confirmed and unconfirmed services, payload opaque | Service translation or object/property remapping |
@@ -161,8 +186,9 @@ This is a **single-device gateway**, not a BACnet device stack and not a router.
 | Segmented requests and responses (except segmented writes) | Segmented writes (denied fail-closed) |
 | IPv4 BACnet/IP on the device leg | BACnet/IPv6 |
 
-A client broadcast is forwarded to the one device as **unicast**: the proxy has
-exactly one device, so a broadcast is a discovery request aimed at it.
+A client broadcast is forwarded to **that listener's device** as unicast: a
+device's listener has exactly one device, so a broadcast is a discovery request
+aimed at it.
 
 ## Security controls
 
@@ -236,15 +262,16 @@ The error parameters are **application-tagged ENUMERATEDs**, the form a strict
 BACnet stack expects; a raw-octet payload would be dropped by the peer and turn
 a clean refusal into a timeout.
 
-**Reload:** `SIGHUP` re-reads the config file and applies **the access policy
-only** — `access.allow`, `access.sc_allow`, `access.rate_per_sec`,
-`access.device_rate_per_sec`, `access.read_only`, `access.write_policy`. The swap
-takes effect on the next datagram with no listener rebind. Everything socket-,
-file- or crypto-bound (`listen_addr`, `device_addr`, `device_local_addr`,
-`device_instance`, `request_timeout_secs`, `max_pending`, `log_level`,
-`metrics.addr`, `audit.*` and the whole `sc` block) is reported as a
-restart-only warning rather than silently ignored. An invalid file, or a policy
-that does not compile, keeps the running policy.
+**Reload:** `SIGHUP` re-reads the config file and applies **each device's access
+policy only** — `access.allow`, `access.sc_allow`, `access.rate_per_sec`,
+`access.device_rate_per_sec`, `access.read_only`, `access.write_policy`, matched
+by device `name`. The swap takes effect on the next datagram with no listener
+rebind. Everything socket-, file- or crypto-bound (`listen_addr`, `device_addr`,
+`device_local_addr`, `device_instance`, `request_timeout_secs`, `max_pending`,
+`log_level`, `metrics.addr`, `audit.*` and the whole `sc` block), and adding or
+removing a device, is reported as a restart-only warning rather than silently
+ignored. An invalid file, or a policy that does not compile, keeps the running
+policy.
 
 ### Audit trail
 
@@ -382,8 +409,20 @@ bacnet-shield gateway \
 
 ### Config files
 
-One file describes one proxy instance. Start from
+One file describes one process: the observability settings plus a `devices:`
+list of one or more listener↔device pairs. Start from
 [`configs/gateway.yaml`](configs/gateway.yaml):
+
+```yaml
+devices:
+  - name: boiler
+    listen_addr: ":47808"
+    device_addr: "10.0.0.42:47808"
+    device_instance: 1001
+    access:
+      allow: ["10.8.0.0/24"]
+      read_only: true
+```
 
 ```bash
 bacnet-shield gateway --config /etc/bacnet-shield/gateway.yaml
@@ -391,6 +430,9 @@ bacnet-shield gateway --config /etc/bacnet-shield/gateway.yaml
 # apply edited ACLs, rate limit and write policy without dropping clients:
 kill -HUP "$(cat /run/bacnet-shield.pid)"   # or: systemctl reload bacnet-shield-gateway
 ```
+
+Flags mode always configures exactly one device; several co-hosted devices need
+a file.
 
 ## Tools
 
@@ -419,7 +461,10 @@ with its class and code. Both `validate` and `selftest` accept the same flags as
 
 Set `metrics.addr` (or `--metrics-addr`) to expose a Prometheus scrape at
 `/metrics`. An empty address disables the listener; bind it to loopback unless
-the monitoring network is trusted.
+the monitoring network is trusted. Every per-device counter and gauge carries a
+`device` label (the config entry's `name`, or its `device_addr`), so one scrape
+covers every co-hosted device; the audit-drop counter is process-wide and has
+no device label.
 
 | Metric | Meaning |
 |---|---|
@@ -432,7 +477,7 @@ the monitoring network is trusted.
 | `bacnet_shield_writes_denied_total` | Writes refused by the write policy |
 | `bacnet_shield_parse_errors_total` | Undecodable datagrams dropped |
 | `bacnet_shield_pending_full_total` | Requests dropped because every invoke ID was in flight |
-| `bacnet_shield_unsupported_total` | Frames or services the single-device gateway cannot serve |
+| `bacnet_shield_unsupported_total` | Frames or services the proxy cannot serve |
 | `bacnet_shield_replayed_total` | Retransmissions answered from the finished-response cache |
 | `bacnet_shield_retransmits_dropped_total` | Retransmissions dropped while the request is in flight |
 | `bacnet_shield_notifications_dropped_total` | Device notifications with no client to receive them |

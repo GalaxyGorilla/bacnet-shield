@@ -1,6 +1,8 @@
-// Command bacnet-shield runs one gateway instance of the BACnet/IP security
-// proxy. The instance is configured either by a YAML file (--config) or
-// entirely by flags, for plug-and-play deployments without config files.
+// Command bacnet-shield runs one process of the BACnet/IP security proxy. The
+// process is configured either by a YAML file (--config) or entirely by flags,
+// for plug-and-play deployments without config files. A file may describe one
+// device or several co-hosted listener<->device pairs; flags always describe a
+// single device.
 package main
 
 import (
@@ -16,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/pflag"
 	"go.uber.org/zap"
 
@@ -84,6 +87,80 @@ func loadChecked(o *config.Options) (*config.Config, error) {
 	return o.Build()
 }
 
+// runningDevice is one co-hosted device: its validated config, its gateway
+// and (when configured) its own BACnet/SC node.
+type runningDevice struct {
+	dev config.Device
+	gw  *proxy.Gateway
+	met *observ.Metrics
+	sc  *scnet.Node
+}
+
+// buildDevices builds and binds every configured device. Binding happens here,
+// not in Serve, so a port conflict is a startup error rather than a goroutine
+// that dies quietly after the process has already announced readiness. A
+// failure closes the gateways already built.
+func buildDevices(cfg *config.Config, log *zap.Logger, reg *prometheus.Registry, audit *observ.Audit) ([]*runningDevice, error) {
+	out := make([]*runningDevice, 0, len(cfg.Devices))
+	closeAll := func() {
+		for _, rd := range out {
+			_ = rd.gw.Close()
+		}
+	}
+	for i := range cfg.Devices {
+		d := cfg.Devices[i]
+		pol, err := d.AccessPolicy()
+		if err != nil {
+			closeAll()
+			return nil, fmt.Errorf("device %q: %w", d.Name, err)
+		}
+		met := observ.NewMetricsForDevice(reg, d.Name)
+		g, err := proxy.New(proxy.Config{
+			ListenAddr:      d.ListenAddr,
+			DeviceAddr:      d.DeviceAddr,
+			DeviceLocalAddr: d.DeviceLocalAddr,
+			RequestTimeout:  time.Duration(d.RequestTimeoutSecs) * time.Second,
+			MaxPending:      d.MaxPending,
+			DeviceInstance:  d.DeviceInstance,
+			DeviceName:      d.Name,
+			Audit:           audit,
+		}, pol, log, met)
+		if err != nil {
+			closeAll()
+			return nil, fmt.Errorf("device %q: %w", d.Name, err)
+		}
+		rd := &runningDevice{dev: d, gw: g, met: met}
+		if d.SC.Enabled() {
+			node, err := buildSCNode(d.SC, log)
+			if err != nil {
+				_ = g.Close()
+				closeAll()
+				return nil, fmt.Errorf("device %q: %w", d.Name, err)
+			}
+			// Attach before Serve: a hub can deliver an NPDU as soon as the
+			// node connects, and the handler must already be in place.
+			g.AttachSC(node)
+			// Expose the link state per device. The handler runs on the
+			// node's goroutine, so the "already attached" flag needs no lock.
+			attached := false
+			node.SetStateHandler(func(connected bool, hub string) {
+				if !connected {
+					met.SCConnected.Set(0)
+					return
+				}
+				if attached {
+					met.SCReconnects.Inc()
+				}
+				attached = true
+				met.SCConnected.Set(1)
+			})
+			rd.sc = node
+		}
+		out = append(out, rd)
+	}
+	return out, nil
+}
+
 // runGateway runs the proxy until a signal arrives.
 func runGateway(args []string) int {
 	fs := pflag.NewFlagSet("gateway", pflag.ContinueOnError)
@@ -105,12 +182,10 @@ func runGateway(args []string) int {
 	}
 	defer func() { _ = log.Sync() }()
 
-	pol, err := cfg.AccessPolicy()
-	if err != nil {
-		log.Error("compile access policy", zap.Error(err))
-		return 1
-	}
-	metrics := observ.NewMetrics()
+	// One registry for the whole process: every device registers its own
+	// instrument set on it, so /metrics stays a single, per-device-labelled
+	// scrape.
+	registry := observ.NewRegistry()
 	var metricsLn net.Listener
 	if cfg.Metrics.Addr != "" {
 		metricsLn, err = observ.Listen(cfg.Metrics.Addr)
@@ -120,12 +195,15 @@ func runGateway(args []string) int {
 		}
 	}
 
-	// The audit stream is opt-in. It is a bounded, non-blocking sink: a full
-	// queue drops records (and counts them) rather than stalling the data
-	// plane, so an on-list client cannot flood the disk through the log path.
+	// The audit stream is opt-in and process-wide. It is a bounded,
+	// non-blocking sink: a full queue drops records (and counts them) rather
+	// than stalling the data plane, so an on-list client cannot flood the
+	// disk through the log path. Each record names the device it concerns.
+	// The drop counter is a process property (one queue serves every device),
+	// so it is registered once on the shared registry, not per device.
 	var audit *observ.Audit
 	if cfg.Audit.File != "" {
-		audit, err = observ.NewAuditFile(cfg.Audit.File, int64(cfg.Audit.MaxMB)<<20, metrics.AuditDropped)
+		audit, err = observ.NewAuditFile(cfg.Audit.File, int64(cfg.Audit.MaxMB)<<20, observ.NewProcessMetrics(registry).AuditDropped)
 		if err != nil {
 			if metricsLn != nil {
 				_ = metricsLn.Close()
@@ -137,15 +215,7 @@ func runGateway(args []string) int {
 		log.Info("audit stream enabled", zap.String("file", cfg.Audit.File), zap.Int("max_mb", cfg.Audit.MaxMB))
 	}
 
-	g, err := proxy.New(proxy.Config{
-		ListenAddr:      cfg.ListenAddr,
-		DeviceAddr:      cfg.DeviceAddr,
-		DeviceLocalAddr: cfg.DeviceLocalAddr,
-		RequestTimeout:  time.Duration(cfg.RequestTimeoutSecs) * time.Second,
-		MaxPending:      cfg.MaxPending,
-		DeviceInstance:  cfg.DeviceInstance,
-		Audit:           audit,
-	}, pol, log, metrics)
+	devices, err := buildDevices(cfg, log, registry, audit)
 	if err != nil {
 		if metricsLn != nil {
 			_ = metricsLn.Close()
@@ -154,68 +224,51 @@ func runGateway(args []string) int {
 		return 1
 	}
 
-	var scNode *scnet.Node
-	if cfg.SC.Enabled() {
-		scNode, err = buildSCNode(cfg.SC, log)
-		if err != nil {
-			if metricsLn != nil {
-				_ = metricsLn.Close()
-			}
-			log.Error("build bacnet/sc leg", zap.Error(err))
-			return 1
-		}
-		// Attach before Serve: a hub can deliver an NPDU as soon as the node
-		// connects, and the handler must already be in place.
-		g.AttachSC(scNode)
-		// Expose the link state: a hub outage must be visible on the metrics
-		// endpoint, not only in the log. The handler runs on the node's
-		// goroutine, so the "already attached" flag needs no lock.
-		attached := false
-		scNode.SetStateHandler(func(connected bool, hub string) {
-			if !connected {
-				metrics.SCConnected.Set(0)
-				return
-			}
-			if attached {
-				metrics.SCReconnects.Inc()
-			}
-			attached = true
-			metrics.SCConnected.Set(1)
-		})
+	gws := make([]*proxy.Gateway, len(devices))
+	for i, rd := range devices {
+		gws[i] = rd.gw
 	}
+	runner := proxy.NewRunner(gws)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	served := make(chan struct{})
 	go func() {
 		defer close(served)
-		_ = g.Serve(ctx)
+		_ = runner.Serve(ctx)
 	}()
-	if scNode != nil {
+	for _, rd := range devices {
+		if rd.sc == nil {
+			continue
+		}
+		rd := rd
 		go func() {
-			if err := scNode.Run(ctx); err != nil && ctx.Err() == nil {
-				log.Error("bacnet/sc node stopped", zap.Error(err))
+			if err := rd.sc.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Error("bacnet/sc node stopped", zap.String("device", rd.dev.Name), zap.Error(err))
 			}
 		}()
 	}
-
 	if metricsLn != nil {
 		go func() {
-			if err := observ.ServeListener(ctx, metricsLn, metrics.Handler(), log); err != nil {
+			if err := observ.ServeListener(ctx, metricsLn, observ.HandlerFor(registry), log); err != nil {
 				log.Error("metrics listener", zap.Error(err))
 			}
 		}()
 	}
 
-	log.Info("bacnet-shield gateway listening",
-		zap.String("listen", g.ClientAddr().String()),
-		zap.String("device", cfg.DeviceAddr),
-		zap.String("device_local", g.DeviceLocalAddr().String()),
-		zap.Int("max_pending", cfg.MaxPending))
-	if scNode != nil {
-		log.Info("bacnet/sc leg configured",
-			zap.String("vmac", cfg.SC.VMAC),
-			zap.Strings("hubs", cfg.SC.Hubs))
+	log.Info("bacnet-shield gateway listening", zap.Int("devices", len(devices)))
+	for _, rd := range devices {
+		fields := []zap.Field{
+			zap.String("device", rd.dev.Name),
+			zap.String("listen", rd.gw.ClientAddr().String()),
+			zap.String("device_addr", rd.dev.DeviceAddr),
+			zap.String("device_local", rd.gw.DeviceLocalAddr().String()),
+			zap.Int("max_pending", rd.dev.MaxPending),
+		}
+		if rd.sc != nil {
+			fields = append(fields, zap.String("sc_vmac", rd.dev.SC.VMAC), zap.Strings("sc_hubs", rd.dev.SC.Hubs))
+		}
+		log.Info("device serving", fields...)
 	}
 
 	if wd := watchdog.Interval(); wd > 0 {
@@ -226,9 +279,9 @@ func runGateway(args []string) int {
 	}
 
 	// SIGINT/SIGTERM shut down; SIGHUP re-reads the config file and applies
-	// the reloadable parts (the front-leg policy). A bad file on SIGHUP is
-	// logged and the running configuration is kept: an operator typo must
-	// never take the proxy down.
+	// the reloadable parts (each device's front-leg policy). A bad file on
+	// SIGHUP is logged and the running configuration is kept: an operator
+	// typo must never take the proxy down.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigCh)
@@ -243,7 +296,7 @@ func runGateway(args []string) int {
 		select {
 		case sig := <-sigCh:
 			if sig == syscall.SIGHUP {
-				reload(o, cfg, g, log)
+				reload(o, cfg, devices, log)
 				continue
 			}
 			log.Info("shutdown signal received", zap.String("signal", sig.String()))
@@ -258,10 +311,13 @@ func runGateway(args []string) int {
 	}
 }
 
-// reload applies the parts of a new config that do not need a restart. The
-// front-leg policy (allow-list, rate limit, write rules) is swapped atomically,
-// so in-flight requests keep the policy they started under.
-func reload(o *config.Options, cur *config.Config, g *proxy.Gateway, log *zap.Logger) {
+// reload applies the parts of a new config that do not need a restart. Each
+// device's front-leg policy (allow-list, rate limit, device budget, write
+// rules) is swapped atomically, so in-flight requests keep the policy they
+// started under. Devices are matched by name; adding or removing a device, or
+// changing anything bound to a socket or the SC identity, needs a restart and
+// is reported rather than silently ignored.
+func reload(o *config.Options, cur *config.Config, devices []*runningDevice, log *zap.Logger) {
 	if o.ConfigPath == "" {
 		log.Warn("SIGHUP ignored: reload requires --config (flags-mode settings come from the command line)")
 		return
@@ -271,18 +327,55 @@ func reload(o *config.Options, cur *config.Config, g *proxy.Gateway, log *zap.Lo
 		log.Error("reload: new config invalid, keeping the running configuration", zap.Error(err))
 		return
 	}
-	pol, err := cfg.AccessPolicy()
-	if err != nil {
-		log.Error("reload: policy invalid, keeping the running configuration", zap.Error(err))
-		return
-	}
-	g.SetPolicy(pol)
 
-	for _, w := range restartOnlyChanges(cur, cfg) {
+	for _, w := range topLevelRestartOnlyChanges(cur, cfg) {
 		log.Warn("reload: " + w)
 	}
+
+	running := make(map[string]bool, len(devices))
+	for _, rd := range devices {
+		running[rd.dev.Name] = true
+	}
+
+	for _, rd := range devices {
+		nd := findDevice(cfg, rd.dev.Name)
+		if nd == nil {
+			log.Warn("reload: device no longer in the config; still serving until restart",
+				zap.String("device", rd.dev.Name))
+			continue
+		}
+		for _, w := range deviceRestartOnlyChanges(rd.dev.Name, &rd.dev, nd) {
+			log.Warn("reload: " + w)
+		}
+		pol, err := nd.AccessPolicy()
+		if err != nil {
+			log.Error("reload: device policy invalid, keeping the running policy",
+				zap.String("device", rd.dev.Name), zap.Error(err))
+			continue
+		}
+		rd.gw.SetPolicy(pol)
+		log.Info("reload: device policy reloaded", zap.String("device", rd.dev.Name))
+	}
+	for i := range cfg.Devices {
+		if !running[cfg.Devices[i].Name] {
+			log.Warn("reload: device is new in the config; not serving until restart",
+				zap.String("device", cfg.Devices[i].Name))
+		}
+	}
+
 	*cur = *cfg
-	log.Info("SIGHUP: access policy reloaded")
+	log.Info("SIGHUP: configuration reloaded", zap.Int("devices", len(devices)))
+}
+
+// findDevice returns the config entry for a running device (matched by name,
+// the identity the logs, metrics and the audit use).
+func findDevice(cfg *config.Config, name string) *config.Device {
+	for i := range cfg.Devices {
+		if cfg.Devices[i].Name == name {
+			return &cfg.Devices[i]
+		}
+	}
+	return nil
 }
 
 // buildSCNode turns the validated sc block into a node. Validation already
@@ -309,38 +402,56 @@ func buildSCNode(s config.SC, log *zap.Logger) (*scnet.Node, error) {
 	}, log)
 }
 
-// restartOnlyChanges names the fields a reload cannot apply. Reporting them is
-// the honest half of a partial reload: silently keeping the old listener while
-// the file says otherwise is how an operator ends up debugging the wrong box.
-func restartOnlyChanges(old, next *config.Config) []string {
+// topLevelRestartOnlyChanges names the process-wide fields a reload cannot
+// apply. Device fields are compared per device.
+func topLevelRestartOnlyChanges(old, next *config.Config) []string {
 	var out []string
-	add := func(name, a, b string) {
+	if old.LogLevel != next.LogLevel {
+		out = append(out, fmt.Sprintf("log_level changed (%q -> %q); restart required", old.LogLevel, next.LogLevel))
+	}
+	if old.Metrics.Addr != next.Metrics.Addr {
+		out = append(out, fmt.Sprintf("metrics.addr changed (%q -> %q); restart required", old.Metrics.Addr, next.Metrics.Addr))
+	}
+	if !reflect.DeepEqual(old.Audit, next.Audit) {
+		out = append(out, "audit.* changed; restart required")
+	}
+	return out
+}
+
+// deviceRestartOnlyChanges names the fields of one device a reload cannot
+// apply: everything bound to a socket or to the SC identity.
+func deviceRestartOnlyChanges(name string, old, next *config.Device) []string {
+	var out []string
+	add := func(field, a, b string) {
 		if a != b {
-			out = append(out, fmt.Sprintf("%s changed (%q -> %q); restart required", name, a, b))
+			out = append(out, fmt.Sprintf("device %s: %s changed (%q -> %q); restart required", name, field, a, b))
 		}
 	}
 	add("listen_addr", old.ListenAddr, next.ListenAddr)
 	add("device_addr", old.DeviceAddr, next.DeviceAddr)
 	add("device_local_addr", old.DeviceLocalAddr, next.DeviceLocalAddr)
-	add("log_level", old.LogLevel, next.LogLevel)
-	add("metrics.addr", old.Metrics.Addr, next.Metrics.Addr)
-	if !reflect.DeepEqual(old.Audit, next.Audit) {
-		out = append(out, "audit.* changed; restart required")
-	}
-	if !reflect.DeepEqual(old.SC, next.SC) {
-		out = append(out, "sc.* changed (vmac, uuid, hubs or TLS); restart required")
-	}
 	if old.RequestTimeoutSecs != next.RequestTimeoutSecs {
-		out = append(out, "request_timeout_secs changed; restart required")
+		out = append(out, fmt.Sprintf("device %s: request_timeout_secs changed (%d -> %d); restart required",
+			name, old.RequestTimeoutSecs, next.RequestTimeoutSecs))
 	}
 	if old.MaxPending != next.MaxPending {
-		out = append(out, "max_pending changed; restart required")
+		out = append(out, fmt.Sprintf("device %s: max_pending changed (%d -> %d); restart required",
+			name, old.MaxPending, next.MaxPending))
 	}
-	if (old.DeviceInstance == nil) != (next.DeviceInstance == nil) ||
-		(old.DeviceInstance != nil && next.DeviceInstance != nil && *old.DeviceInstance != *next.DeviceInstance) {
-		out = append(out, "device_instance changed; restart required")
+	if instanceChanged(old.DeviceInstance, next.DeviceInstance) {
+		out = append(out, fmt.Sprintf("device %s: device_instance changed; restart required", name))
+	}
+	if !reflect.DeepEqual(old.SC, next.SC) {
+		out = append(out, fmt.Sprintf("device %s: sc.* changed (vmac, uuid, hubs or TLS); restart required", name))
 	}
 	return out
+}
+
+func instanceChanged(a, b *uint32) bool {
+	if (a == nil) != (b == nil) {
+		return true
+	}
+	return a != nil && *a != *b
 }
 
 // check is one validate/selftest result line.
@@ -397,38 +508,49 @@ func runValidate(args []string) int {
 	return finishReport(rep, *jsonOut, "validate")
 }
 
-// configChecks summarizes a validated config for a human or a tool.
+// configChecks summarizes a validated config for a human or a tool: one line
+// per configured device plus the process-wide settings.
 func configChecks(cfg *config.Config) []check {
-	detail := fmt.Sprintf("%s -> %s", cfg.ListenAddr, cfg.DeviceAddr)
-	if cfg.Access.ReadOnly {
-		detail += " (read-only)"
-	}
-	if len(cfg.Access.Allow) > 0 {
-		detail += fmt.Sprintf(" (allowlist(%d))", len(cfg.Access.Allow))
-	}
-	if cfg.Access.RatePerSec > 0 {
-		detail += fmt.Sprintf(" (rate %.2f/s per client)", cfg.Access.RatePerSec)
-	}
-	out := []check{{Name: "config", OK: true, Detail: detail}}
+	out := []check{{Name: "config", OK: true,
+		Detail: fmt.Sprintf("%d device(s), log_level %s", len(cfg.Devices), cfg.LogLevel)}}
 	if cfg.Audit.File != "" {
 		out = append(out, check{Name: "audit", OK: true,
 			Detail: fmt.Sprintf("%s (rotate at %d MiB)", cfg.Audit.File, cfg.Audit.MaxMB)})
 	}
-	if cfg.DeviceInstance != nil {
-		out = append(out, check{Name: "device-instance", OK: true,
-			Detail: fmt.Sprintf("pinned to device,%d", *cfg.DeviceInstance)})
-	}
-	if cfg.SC.Enabled() {
-		scDetail := fmt.Sprintf("vmac %s -> %s", cfg.SC.VMAC, strings.Join(cfg.SC.Hubs, ", "))
-		if len(cfg.Access.SCAllow) > 0 {
-			scDetail += fmt.Sprintf(" (allowlist(%d))", len(cfg.Access.SCAllow))
-		}
-		out = append(out, check{Name: "bacnet-sc", OK: true, Detail: scDetail})
+	for i := range cfg.Devices {
+		out = append(out, deviceCheck(&cfg.Devices[i]))
 	}
 	return out
 }
 
-// runSelftest validates the configuration and probes the device leg directly
+// deviceCheck summarizes one device entry.
+func deviceCheck(d *config.Device) check {
+	detail := fmt.Sprintf("%s -> %s", d.ListenAddr, d.DeviceAddr)
+	if d.Access.ReadOnly {
+		detail += " (read-only)"
+	}
+	if n := len(d.Access.Allow); n > 0 {
+		detail += fmt.Sprintf(" (allowlist(%d))", n)
+	}
+	if d.Access.RatePerSec > 0 {
+		detail += fmt.Sprintf(" (rate %.2f/s per client)", d.Access.RatePerSec)
+	}
+	if d.Access.DeviceRatePerSec > 0 {
+		detail += fmt.Sprintf(" (device rate %.2f/s)", d.Access.DeviceRatePerSec)
+	}
+	if d.DeviceInstance != nil {
+		detail += fmt.Sprintf(" (device,%d)", *d.DeviceInstance)
+	}
+	if d.SC.Enabled() {
+		detail += fmt.Sprintf(" [sc vmac %s -> %s]", d.SC.VMAC, strings.Join(d.SC.Hubs, ", "))
+		if n := len(d.Access.SCAllow); n > 0 {
+			detail += fmt.Sprintf(" (sc_allow(%d))", n)
+		}
+	}
+	return check{Name: "device " + d.Name, OK: true, Detail: detail}
+}
+
+// runSelftest validates the configuration and probes each device leg directly
 // from this host with a real BACnet request, proving reachability. It is
 // designed for commissioning and health checks. Exit 0 = all checks passed.
 func runSelftest(args []string) int {
@@ -452,15 +574,18 @@ func runSelftest(args []string) int {
 	if *probe {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		res, err := proxy.ProbeDevice(ctx, cfg.DeviceAddr, cfg.DeviceInstance)
-		c := check{Name: "device " + cfg.DeviceAddr}
-		if err != nil {
-			c.Detail = err.Error()
-		} else {
-			c.OK = true
-			c.Detail = res.Detail
+		for i := range cfg.Devices {
+			d := cfg.Devices[i]
+			res, err := proxy.ProbeDevice(ctx, d.DeviceAddr, d.DeviceInstance)
+			c := check{Name: "device " + d.Name}
+			if err != nil {
+				c.Detail = err.Error()
+			} else {
+				c.OK = true
+				c.Detail = res.Detail
+			}
+			rep.Checks = append(rep.Checks, c)
 		}
-		rep.Checks = append(rep.Checks, c)
 	}
 
 	for _, ch := range rep.Checks {
@@ -501,12 +626,12 @@ func finishSelftest(rep report, jsonOut bool) int {
 }
 
 func usage(w *os.File) {
-	fmt.Fprintf(w, `bacnet-shield — BACnet/IP security proxy for one legacy device
+	fmt.Fprintf(w, `bacnet-shield — BACnet/IP security proxy for one or more legacy devices
 
-Usage (config file):
+Usage (config file, one or more devices):
   bacnet-shield gateway --config <file>
 
-Usage (flags, no config file — plug and play):
+Usage (flags, no config file — one device, plug and play):
   bacnet-shield gateway --listen <ip:port> --device <legacy-device:port> \
       [--read-only] [--allow <ip|cidr>]... [--rate-per-sec <n>] \
       [--device-rate-per-sec <n>] \
@@ -520,10 +645,25 @@ Usage (flags, no config file — plug and play):
        [--sc-ca <pem>] [--sc-cert <pem>] [--sc-key <pem>] \
        [--sc-allow <vmac>]...]
 
-The gateway sits between a building's clients and ONE legacy device:
+The process sits between a building's clients and one or more legacy devices.
+Each devices: entry in the file couples exactly one front-leg listener with one
+device and carries that device's own policy, so one process can protect several
+devices without becoming a router:
 
-  [N clients] --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [legacy device]
-  [N SC nodes] --BACnet/SC--> [hub] --> [bacnet-shield] --BACnet/IP--> ...
+  devices:
+    - name: boiler            # label in logs, metrics and the audit
+      listen_addr: 192.0.2.10:47808   # this device's own local IP, port 47808
+      device_addr: 10.0.0.42:47808
+      access:
+        allow: ["192.0.2.0/24"]
+        read_only: true
+    - name: ahu
+      listen_addr: 192.0.2.11:47808
+      device_addr: 10.0.0.43:47808
+
+Give each device its own local IP on the standard port 47808, so a client's
+broadcast Who-Is still reaches the whole building. Flags mode always configures
+exactly one device.
 
 It rewrites only the network layer and the APDU invoke ID; the service
 payload is forwarded byte for byte, so vendor quirks survive. Client-leg
@@ -545,32 +685,35 @@ Write policy (object-scoped, instead of all-or-nothing --read-only):
   WritePropertyMultiple can never straddle an allowed rule. An undecodable
   or segmented write is denied. Mutually exclusive with --read-only.
 
-BACnet/SC front leg: the proxy attaches to an existing hub as a node, never
-as a hub. A client is identified by its VMAC, so SC nodes share the same
-pending table, replay cache, COV routing and write policy as IP clients and
-are independent of each other. --sc-allow opts into a VMAC allow-list; with
-none configured every node the hub delivers is accepted and only the write
-policy gates it. --sc-ca replaces the system roots; --sc-cert/--sc-key present
-a client certificate. The clear device leg stays plain BACnet/IP.
+BACnet/SC front leg: with an sc: block (or the --sc-* flags) the device's
+proxy attaches to an existing hub as a node, never as a hub. A client is
+identified by its VMAC, so SC nodes share the same pending table, replay cache,
+COV routing and write policy as IP clients and are independent of each other.
+Each device with an sc block is its own SC node (own VMAC) — give each a
+distinct vmac. --sc-allow opts into a VMAC allow-list; with none configured
+every node the hub delivers is accepted and only the write policy gates it.
+--sc-ca replaces the system roots; --sc-cert/--sc-key present a client
+certificate. The clear device leg stays plain BACnet/IP.
 
-Reload: send SIGHUP to re-read --config and swap the access policy (including
-sc_allow) in place. Listener, device address, timeouts, log level and the SC
-identity/hub/TLS block need a restart and are reported as warnings.
+Reload: send SIGHUP to re-read --config and swap each device's access policy
+(including sc_allow) in place, matched by device name. Adding or removing a
+device, and any listener, device address, timeout, max_pending or SC
+identity/hub/TLS change, needs a restart and is reported as a warning.
 
 Audit: with --audit-file (or audit.file in YAML) every security decision the
 front leg makes (ACL, rate limit, device budget, write policy, unsupported
-subscription) is appended as one JSON object per line, with the decoded
-object/property target of a refused write. The file rotates at --audit-max-mb,
-keeping one backup, so it is bounded; a full in-memory queue drops records and
-counts them (bacnet_shield_audit_dropped_total) rather than stalling the data
-plane. The audit is off unless a file is configured.
+subscription) is appended as one JSON object per line, naming the device and,
+for a refused write, the decoded object/property target. The file rotates at
+--audit-max-mb, keeping one backup, so it is bounded; a full in-memory queue
+drops records and counts them (bacnet_shield_audit_dropped_total) rather than
+stalling the data plane. The audit is off unless a file is configured.
 
 Other commands:
   bacnet-shield validate [--config <file> | same flags as gateway] [--json]
       check a configuration without running (pre-apply for tooling)
   bacnet-shield selftest [--config <file> | same flags as gateway]
       [--probe=false] [--json]
-      validate + probe the device with a real BACnet ReadProperty or Who-Is
+      validate + probe each device with a real BACnet ReadProperty or Who-Is
   bacnet-shield version
 `)
 }

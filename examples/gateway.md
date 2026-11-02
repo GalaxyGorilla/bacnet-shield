@@ -87,15 +87,18 @@ the whole migration.
 ## 2. Or with a config file
 
 For anything more than a two-line install, use YAML — one file describes one
-proxy instance. Start from [`configs/gateway.yaml`](../configs/gateway.yaml):
+process and a `devices:` list. Start from
+[`configs/gateway.yaml`](../configs/gateway.yaml):
 
 ```bash
 bacnet-shield gateway --config /etc/bacnet-shield/gateway.yaml
 ```
 
-The example config is fully annotated and covers the client leg, the one
-device, the optional device instance, timeouts, the access policy, the optional
-BACnet/SC block and the metrics listener.
+The example config is fully annotated and covers each device's client leg,
+device address, optional device instance, timeouts, access policy and optional
+BACnet/SC block, plus the process-wide metrics and audit settings. Add more
+entries under `devices:` to protect several devices with one process; each needs
+its own local IP on port 47808 and carries its own policy.
 
 ## 3. Verify on site
 

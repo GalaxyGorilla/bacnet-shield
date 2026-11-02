@@ -43,15 +43,17 @@ host and a bind failure is never advertised as ready.
 
 ## Config layout
 
-One file describes one proxy instance. `configs/gateway.yaml` is the annotated
-template; copy it and edit:
+One file describes one process: process-wide `log_level`, `metrics` and `audit`,
+plus a `devices:` list of one or more listener↔device pairs.
+`configs/gateway.yaml` is the annotated template; copy it and edit:
 
-- **Restart-only**: `listen_addr`, `device_addr`, `device_local_addr`,
-  `device_instance`, `request_timeout_secs`, `max_pending`, `log_level`,
-  `metrics.addr`, `audit.*`, and the whole `sc` block.
-- **Reloadable on `SIGHUP`**: `access.allow`, `access.sc_allow`,
-  `access.rate_per_sec`, `access.device_rate_per_sec`, `access.read_only`,
-  `access.write_policy`.
+- **Restart-only**: adding or removing a device, and `listen_addr`,
+  `device_addr`, `device_local_addr`, `device_instance`,
+  `request_timeout_secs`, `max_pending`, `log_level`, `metrics.addr`, `audit.*`,
+  and the whole `sc` block.
+- **Reloadable on `SIGHUP`** (per device, matched by `name`): `access.allow`,
+  `access.sc_allow`, `access.rate_per_sec`, `access.device_rate_per_sec`,
+  `access.read_only`, `access.write_policy`.
 
 Keep the config readable only by the service user if it names internal addresses
 or an `sc` client key. An `sc` client private key (`key_file`) should be `0600`
@@ -86,7 +88,10 @@ pinned on the wire.
 
 `metrics.addr` (default in the example config: `127.0.0.1:9203`) serves
 Prometheus at `/metrics`. Bind it to loopback unless the monitoring network is
-trusted. The instruments that matter operationally:
+trusted. Every per-device instrument carries a `device` label (the entry's
+`name`), so one scrape covers every co-hosted device; group by `device` to find
+the sick one. `bacnet_shield_audit_dropped_total` is process-wide (no device
+label). The instruments that matter operationally:
 
 | Signal | Metric | Watch for |
 |---|---|---|

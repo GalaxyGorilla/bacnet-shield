@@ -1,24 +1,31 @@
 # Access control (who may connect, how hard, and which writes)
 
 Every bacnet-shield deployment has a client leg with peers you may or may not
-trust, so the same `access` section governs all of it: **who** may talk to the
-proxy, **how fast**, and **what may be written**. The rules are the same for an
-IP client (keyed by `ip:port`) and a BACnet/SC client (keyed by `vmac`), which is
-what lets the two front legs share one policy and one set of counters.
+trust, so each device's `access` block governs all of it: **who** may talk to
+the proxy, **how fast**, and **what may be written**. The rules are the same for
+an IP client (keyed by `ip:port`) and a BACnet/SC client (keyed by `vmac`),
+which is what lets the two front legs share one policy and one set of counters.
+
+In a config file the block sits under one `devices:` entry, so every co-hosted
+device gets its own allow-list, rate limit and write policy:
 
 ```yaml
-access:
-  allow: ["10.8.0.0/24", "192.168.1.7"]   # client allow-list (IP or CIDR)
-  sc_allow: ["02:00:00:00:00:0a"]         # SC allow-list (VMAC)
-  rate_per_sec: 50                        # per-client request rate (0 = off)
-  device_rate_per_sec: 200                # shared rate toward the device (0 = off)
-  read_only: true                         # refuse every write
-  # ...or, instead of read_only, a scope-limited write policy:
-  # write_policy:
-  #   default: deny
-  #   rules:
-  #     - {oid: "analog-value:5:present-value", action: allow}
-  #     - {oid: "analog-value:*:present-value", action: deny}
+devices:
+  - name: boiler
+    listen_addr: "10.0.0.10:47808"
+    device_addr: "10.0.0.42:47808"
+    access:
+      allow: ["10.8.0.0/24", "192.168.1.7"]   # client allow-list (IP or CIDR)
+      sc_allow: ["02:00:00:00:00:0a"]         # SC allow-list (VMAC)
+      rate_per_sec: 50                        # per-client request rate (0 = off)
+      device_rate_per_sec: 200                # shared rate toward the device (0 = off)
+      read_only: true                         # refuse every write
+      # ...or, instead of read_only, a scope-limited write policy:
+      # write_policy:
+      #   default: deny
+      #   rules:
+      #     - {oid: "analog-value:5:present-value", action: allow}
+      #     - {oid: "analog-value:*:present-value", action: deny}
 ```
 
 `read_only` and `write_policy` are mutually exclusive; both at once is a config

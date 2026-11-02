@@ -62,7 +62,7 @@ func readAuditEvent(t *testing.T, r *bufio.Reader) observ.AuditEvent {
 func TestGatewayAuditWriteDenied(t *testing.T) {
 	dev := newFakeDevice(t, "127.0.0.1")
 	audit, r := newAuditPipe(t)
-	f := startGateway(t, Config{DeviceAddr: dev.addr().String(), Audit: audit}, readOnlyPolicy(t))
+	f := startGateway(t, Config{DeviceAddr: dev.addr().String(), DeviceName: "boiler", Audit: audit}, readOnlyPolicy(t))
 
 	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 5}
 	c := newTestClient(t)
@@ -71,6 +71,11 @@ func TestGatewayAuditWriteDenied(t *testing.T) {
 	ev := readAuditEvent(t, r)
 	if ev.Event != "write_denied" || ev.Leg != "ip" {
 		t.Fatalf("event = %q leg = %q", ev.Event, ev.Leg)
+	}
+	// In a co-hosted process the record must name the device it concerns, so
+	// two devices' denials can be told apart in one stream.
+	if ev.Device != "boiler" {
+		t.Fatalf("device = %q, want boiler", ev.Device)
 	}
 	if ev.Service != "write-property" {
 		t.Fatalf("service = %q, want write-property", ev.Service)

@@ -1,7 +1,7 @@
 # BACKLOG — bacnet-shield
 
 The v1 proxy scope is complete. The items below are the next deliberate
-steps, not missing pieces of the documented single-device gateway.
+steps, not missing pieces of the documented co-hosting gateway.
 
 ## Done — v1 (kept for reference)
 
@@ -25,7 +25,7 @@ steps, not missing pieces of the documented single-device gateway.
 
 - Global device budget (B8): an optional shared token bucket
   (`access.device_rate_per_sec` / `--device-rate-per-sec`) bounds the total
-  request rate toward the one device across all clients, complementing the
+  request rate toward each device across all clients, complementing the
   per-client `rate_per_sec` fairness control. The per-client bucket is charged
   first, so a rate-denied request never spends the shared budget; both front
   legs charge the same budget. Denials are silent and counted as
@@ -38,6 +38,13 @@ steps, not missing pieces of the documented single-device gateway.
   (`bacnet_shield_audit_dropped_total`). Restart-only.
 - Service names (`bacnet.APDU.ServiceName`) for the two service-number spaces,
   used by the audit and the human log.
+- Multi-device co-hosting (B2): a `devices:` list builds one independent
+  listener↔device `Gateway` per entry (own sockets, access policy, pending /
+  replay / COV tables) and a `Runner` serves them together. Each entry has its
+  own optional SC node (own VMAC/UUID). Every counter and gauge carries a
+  `device` label on one shared registry; the audit names the device. `SIGHUP`
+  reloads each device's policy, matched by `name`; adding/removing a device is
+  restart-only. Not a router: no BBMD and no traffic between devices.
 
 ## Open
 
@@ -84,10 +91,14 @@ The clear device leg stays plain BACnet/IP.
 
 ### B2 — Multi-device instance
 
-One listener/device pair per config entry, with per-device policy and metrics
-labels. This is not a small loop change: broadcast semantics, active-client
-tracking and the pending tables must become per-device, and a client must not
-be able to reach a device whose listener it did not use.
+DONE. A config file lists one or more listener↔device pairs under `devices:`,
+each with its own access policy and optional `sc:` node. Each pair is a separate
+`Gateway` (own client/device sockets, pending, replay and COV tables), so a
+client can only reach the device whose listener it used; a `Runner` starts and
+stops them together. Metrics carry a `device` label on one shared registry, the
+audit names the device, and `SIGHUP` reloads each device's policy by `name`.
+Adding/removing a device is restart-only. Flags mode stays single-device. See
+[README.md](README.md#deployment-shape) and `internal/proxy/runner.go`.
 
 ### B3 — BBMD / forwarded-NPDU clients
 
@@ -130,7 +141,7 @@ new functionality.
 ### B8 — Global device budget
 
 DONE. The per-client `rate_per_sec` remains the fairness control; an optional
-shared `access.device_rate_per_sec` bounds the total rate toward the one device.
+shared `access.device_rate_per_sec` bounds the total rate toward each device.
 See [README.md](README.md#security-controls) and
 [examples/access-control.md](examples/access-control.md).
 

@@ -25,17 +25,17 @@ func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
 	switch pol.Check(src.IP, now) {
 	case access.DenyACL:
 		g.metrics.ACLDenied.Inc()
-		g.audit.Record(observ.AuditEvent{Event: "acl_denied", Leg: "ip", Client: src.String()})
+		g.recordAudit(observ.AuditEvent{Event: "acl_denied", Leg: "ip", Client: src.String()})
 		g.log.Debug("client denied by acl", zap.Stringer("client", src))
 		return
 	case access.DenyRate:
 		g.metrics.RateLimited.Inc()
-		g.audit.Record(observ.AuditEvent{Event: "rate_limited", Leg: "ip", Client: src.String(), Reason: "per_client_rate"})
+		g.recordAudit(observ.AuditEvent{Event: "rate_limited", Leg: "ip", Client: src.String(), Reason: "per_client_rate"})
 		g.log.Debug("client denied by rate limit", zap.Stringer("client", src))
 		return
 	case access.DenyDevice:
 		g.metrics.DeviceRateLimited.Inc()
-		g.audit.Record(observ.AuditEvent{Event: "device_budget_denied", Leg: "ip", Client: src.String(), Reason: "device_budget"})
+		g.recordAudit(observ.AuditEvent{Event: "device_budget_denied", Leg: "ip", Client: src.String(), Reason: "device_budget"})
 		g.log.Debug("client denied by the shared device budget", zap.Stringer("client", src))
 		return
 	}
@@ -116,7 +116,7 @@ func (g *Gateway) handleClientConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, no
 	if a.Service == bacnet.ServiceSubscribeCOVPropertyMultiple ||
 		(a.Segmented && (a.Service == bacnet.ServiceSubscribeCOV || a.Service == bacnet.ServiceSubscribeCOVProperty)) {
 		g.metrics.Unsupported.Inc()
-		g.audit.Record(observ.AuditEvent{
+		g.recordAudit(observ.AuditEvent{
 			Event: "unsupported_subscription", Leg: peerLeg(p), Client: p.String(),
 			Service: a.ServiceName(), Reason: "unsupported_subscription",
 		})
@@ -129,7 +129,7 @@ func (g *Gateway) handleClientConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, no
 	if allowed, reason := pol.WriteVerdict(a); !allowed {
 		g.metrics.WritesDenied.Inc()
 		targets := writeTargetStrings(a)
-		g.audit.Record(observ.AuditEvent{
+		g.recordAudit(observ.AuditEvent{
 			Event: "write_denied", Leg: peerLeg(p), Client: p.String(),
 			Service: a.ServiceName(), Targets: targets, Reason: reason,
 		})
@@ -279,7 +279,7 @@ func (g *Gateway) handleClientUnconfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, 
 	if allowed, reason := pol.WriteVerdict(a); !allowed {
 		g.metrics.WritesDenied.Inc()
 		targets := writeTargetStrings(a)
-		g.audit.Record(observ.AuditEvent{
+		g.recordAudit(observ.AuditEvent{
 			Event: "write_denied", Leg: peerLeg(p), Client: p.String(),
 			Service: a.ServiceName(), Targets: targets, Reason: reason,
 		})

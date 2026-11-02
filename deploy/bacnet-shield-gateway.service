@@ -2,9 +2,11 @@
 # Install: cp deploy/bacnet-shield-gateway.service /etc/systemd/system/
 #          systemctl daemon-reload && systemctl enable --now bacnet-shield-gateway
 #
-# The gateway is a single box in front of one legacy BACnet/IP device. It
-# multiplexes all clients onto one device-leg socket and enforces the
-# allow-list, per-client rate limit and write policy. Config from
+# The gateway protects one or more legacy BACnet/IP devices. Each `devices:`
+# entry in the config is an independent listener<->device pair: the proxy
+# multiplexes that pair's clients onto its own device-leg socket and enforces
+# that device's allow-list, per-client rate limit and write policy. No traffic
+# crosses between co-hosted devices. Config from
 # /etc/bacnet-shield/gateway.yaml (see configs/gateway.yaml). The device-side
 # wire stays plain BACnet/IP.
 

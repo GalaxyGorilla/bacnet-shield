@@ -1,12 +1,14 @@
 # BACnet Shield security model
 
-BACnet Shield is a security boundary in front of one legacy BACnet/IP device.
-It reduces exposure; it does not make an untrusted device, host, or clear
-network segment trustworthy.
+BACnet Shield is a security boundary in front of one or more legacy BACnet/IP
+devices. It reduces exposure; it does not make an untrusted device, host, or
+clear network segment trustworthy.
 
 ## Protected assets
 
-- Availability of a fragile legacy device and its single upstream socket.
+- Availability of each fragile legacy device and its single upstream socket.
+- Isolation between co-hosted devices: a client of one device's listener can
+  never reach another device, and one device's policy never gates another's.
 - Object/property writes governed by read-only or scoped write policy.
 - COV subscriptions, so a client only receives notifications for objects it
   subscribed to.
@@ -17,9 +19,9 @@ network segment trustworthy.
 
 ## Trust boundaries
 
-The appliance host, configuration file and administrators are trusted. A
-one-box gateway leaves the final proxy-to-device BACnet/IP leg clear;
-physically protect or isolate that segment.
+The appliance host, configuration file and administrators are trusted. The
+deployment leaves each proxy-to-device BACnet/IP leg clear; physically protect
+or isolate those segments.
 
 The BACnet/SC front leg (TLS 1.3 + WebSocket, BVLC-SC `0x82`) secures the
 client side only. The proxy is a **node** of an existing hub; it is not a hub.
@@ -74,9 +76,11 @@ answered with a BACnet Error PDU (see [README.md](README.md)).
 ## Deliberate limits
 
 - BACnet Shield is not a firewall, an IDS, a BACnet device stack, a router or a
-  BBMD. It forwards one device's traffic and gates the client leg.
-- The one-box deployment does not encrypt or authenticate the legacy device
-  leg; that leg is trusted at the network layer.
+  BBMD. It forwards each device's traffic over its own isolated listener↔device
+  pair and gates that pair's client leg; no traffic crosses between co-hosted
+  devices.
+- The deployment does not encrypt or authenticate the legacy device legs; those
+  legs are trusted at the network layer.
 - The proxy does not authenticate SC nodes itself; it trusts the hub to do so.
   `access.sc_allow` can narrow that set by VMAC, but it cannot detect a hub
   that misattributes a frame.

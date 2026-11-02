@@ -55,29 +55,34 @@ Add an `sc:` block to the same file that describes the device. The clear leg and
 the access policy are unchanged:
 
 ```yaml
-listen_addr: ":47808"          # the IP leg stays up too (additive, not a swap)
-device_addr: "10.0.0.42:47808"
-device_instance: 1001
+devices:
+  - name: boiler
+    listen_addr: ":47808"          # the IP leg stays up too (additive, not a swap)
+    device_addr: "10.0.0.42:47808"
+    device_instance: 1001
 
-sc:
-  vmac: "02:00:00:00:00:01"
-  uuid: "00112233-4455-6677-8899-aabbccddeeff"
-  hubs:                                          # primary first, failover after
-    - "wss://hub1.example:47808/"
-    - "wss://hub2.example:47808/"
-  ca_file: "/etc/bacnet-shield/hub-ca.pem"       # optional; system roots if unset
-  # cert_file: "/etc/bacnet-shield/node.pem"     # optional client certificate
-  # key_file:  "/etc/bacnet-shield/node.key"
+    sc:
+      vmac: "02:00:00:00:00:01"
+      uuid: "00112233-4455-6677-8899-aabbccddeeff"
+      hubs:                                          # primary first, failover after
+        - "wss://hub1.example:47808/"
+        - "wss://hub2.example:47808/"
+      ca_file: "/etc/bacnet-shield/hub-ca.pem"       # optional; system roots if unset
+      # cert_file: "/etc/bacnet-shield/node.pem"     # optional client certificate
+      # key_file:  "/etc/bacnet-shield/node.key"
 
-access:
-  sc_allow:                                      # optional VMAC allow-list
-    - "02:00:00:00:00:0a"
-    - "02:00:00:00:00:0b"
-  write_policy:
-    default: deny
-    rules:
-      - {oid: "analog-value:5:present-value", action: allow}
+    access:
+      sc_allow:                                      # optional VMAC allow-list
+        - "02:00:00:00:00:0a"
+        - "02:00:00:00:00:0b"
+      write_policy:
+        default: deny
+        rules:
+          - {oid: "analog-value:5:present-value", action: allow}
 ```
+
+Each `devices:` entry with an `sc:` block is its own SC node, so a co-hosted
+second device needs its own `vmac`/`uuid` and may attach to the same hub.
 
 Flags mode has the same surface:
 

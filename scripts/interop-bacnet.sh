@@ -77,29 +77,33 @@ write_config() {
 	# write_config <read_only|policy>
 	if [ "$1" = "read_only" ]; then
 		cat >"$cfg" <<EOF
-listen_addr: "$PROXY_ADDR"
-device_addr: "$DEV_ADDR"
-device_instance: 1001
+devices:
+  - name: interop
+    listen_addr: "$PROXY_ADDR"
+    device_addr: "$DEV_ADDR"
+    device_instance: 1001
+    access:
+      read_only: true
 log_level: info
 audit:
   file: "$audit"
-access:
-  read_only: true
 EOF
 	else
 		cat >"$cfg" <<EOF
-listen_addr: "$PROXY_ADDR"
-device_addr: "$DEV_ADDR"
-device_instance: 1001
+devices:
+  - name: interop
+    listen_addr: "$PROXY_ADDR"
+    device_addr: "$DEV_ADDR"
+    device_instance: 1001
+    access:
+      write_policy:
+        default: deny
+        rules:
+          - oid: "analog-value:1:present-value"
+            action: allow
 log_level: info
 audit:
   file: "$audit"
-access:
-  write_policy:
-    default: deny
-    rules:
-      - oid: "analog-value:1:present-value"
-        action: allow
 EOF
 	fi
 }
@@ -136,7 +140,7 @@ echo "== SIGHUP: allow analog-value:1:present-value in place"
 write_config policy
 gw_pid="$(echo "$pids" | awk '{print $NF}')"
 kill -HUP "$gw_pid"
-wait_for "$gw_log" "access policy reloaded" 50 || fail "policy reload"
+wait_for "$gw_log" "device policy reloaded" 50 || fail "policy reload"
 
 echo "== write now allowed for analog-value,1 present-value"
 run_client write analog-value,1 present-value || fail "allowed write"

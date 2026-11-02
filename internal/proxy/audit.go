@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/observ"
 )
 
 // The audit stream records every front-leg security decision as a structured
@@ -9,6 +10,14 @@ import (
 // never changes it. Events are emitted only where the policy already decided
 // something (allow-list, rate limit, device budget, write policy, unsupported
 // subscription), so the audit adds no new traffic path.
+
+// recordAudit stamps the device label and enqueues one audit event. It never
+// blocks and is safe when the audit is off (a nil *observ.Audit records
+// nothing), so call sites record unconditionally.
+func (g *Gateway) recordAudit(ev observ.AuditEvent) {
+	ev.Device = g.name
+	g.audit.Record(ev)
+}
 
 // peerLeg names the front leg a peer arrived on, for the audit record. The
 // data plane treats both legs identically; only the audit labels which door the

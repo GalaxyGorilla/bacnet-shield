@@ -1,134 +1,170 @@
-# bacnet-shield example configuration — single-device gateway (v1).
-# One file = one proxy instance in front of ONE legacy BACnet/IP device.
+# bacnet-shield example configuration.
+#
+# One file = one process serving one or more listener<->device pairs. Each
+# `devices:` entry couples exactly one front-leg listener with ONE legacy
+# BACnet/IP device and carries that device's own policy. Co-hosting several
+# devices in one process is not routing: a client reaches a device only through
+# that device's listener, and no datagram ever moves between devices.
 #
 #   [N clients] --BACnet/IP--> [bacnet-shield] --BACnet/IP--> [legacy device]
 #   [N SC nodes] --BACnet/SC--> [existing hub] --> [bacnet-shield] --BACnet/IP-->
 #
 # Run:    bacnet-shield gateway --config /etc/bacnet-shield/gateway.yaml
-# Reload: kill -HUP <pid>   (swaps the access policy in place)
+# Reload: kill -HUP <pid>   (swaps each device's access policy in place)
 #   Applies: access.allow, access.sc_allow, access.rate_per_sec,
 #            access.device_rate_per_sec, access.read_only,
 #            access.write_policy.
-#   Needs a restart (logged as warnings): listen_addr, device_addr,
-#            device_local_addr, device_instance, request_timeout_secs,
-#            max_pending, log_level, metrics.addr, audit.* and the sc block.
+#   Needs a restart (logged as warnings): adding or removing a device, and any
+#            listen_addr, device_addr, device_local_addr, device_instance,
+#            request_timeout_secs, max_pending, log_level, metrics.addr,
+#            audit.* or sc block change.
 # Or without a file (single device, flags only):
 #   bacnet-shield gateway --listen :47808 --device 10.0.0.42:47808 --read-only
 #
 # Clients keep talking BACnet/IP; only the address they point at changes
 # (this box). The device sees a normal BACnet client and notices nothing.
 
-# The client leg. :47808 is the standard BACnet/IP UDP port. If the device
-# and the proxy share a host, give the proxy a different port here.
-listen_addr: ":47808"
+devices:
+  - # Optional label used in logs, the audit and the `device` metric label.
+    # Falls back to device_addr. It must be unique, and it is what a SIGHUP
+    # reload matches a running device against.
+    name: boiler
 
-# The one legacy device on the clear leg. It must be a unicast IPv4 address.
-device_addr: "10.0.0.42:47808"
+    # The client leg for this device. :47808 is the standard BACnet/IP UDP port.
+    # For several devices, give each its own local IP on port 47808, so a
+    # client's broadcast Who-Is still reaches the whole building. If the device
+    # and the proxy share a host, give the proxy a different port here.
+    listen_addr: ":47808"
 
-# Optional source address of the device leg. Empty = ephemeral port, which is
-# what a BACnet client uses. Pin it when a firewall rule or the device's
-# BBMD/FDT expects a known source.
-# device_local_addr: "10.0.0.10:47808"
+    # The one legacy device on the clear leg. It must be a unicast IPv4 address.
+    device_addr: "10.0.0.42:47808"
 
-# Optional expected device instance. It never gates traffic; a mismatch is a
-# warning in the log and a selftest failure. It also lets selftest probe with
-# a unicast ReadProperty instead of a Who-Is.
-device_instance: 1001
+    # Optional source address of the device leg. Empty = ephemeral port, which
+    # is what a BACnet client uses. Pin it when a firewall rule or the device's
+    # BBMD/FDT expects a known source.
+    # device_local_addr: "10.0.0.10:47808"
 
-# How long a forwarded request may stay pending before its invoke ID is
-# reclaimed. BACnet APDU retry timers are seconds; 30s covers a lossy
-# building network without holding state.
-request_timeout_secs: 30
+    # Optional expected device instance. It never gates traffic; a mismatch is
+    # a warning in the log and a selftest failure. It also lets selftest probe
+    # with a unicast ReadProperty instead of a Who-Is.
+    device_instance: 1001
 
-# In-flight request cap (1..256; the BACnet invoke ID is one octet).
-max_pending: 256
+    # How long a forwarded request may stay pending before its invoke ID is
+    # reclaimed. BACnet APDU retry timers are seconds; 30s covers a lossy
+    # building network without holding state. 0 = default 30.
+    request_timeout_secs: 30
+
+    # In-flight request cap (1..256; the BACnet invoke ID is one octet).
+    # 0 = default 256.
+    max_pending: 256
+
+    # This device's front-leg policy. Every device has its own allow-list, rate
+    # limit, shared budget and write policy, so one device can be locked
+    # read-only while another is writable in the same process.
+    access:
+      # Client allow-list (IPs or CIDRs). Empty/omitted = every client.
+      # An off-list datagram is dropped silently: answering it would tell a
+      # scanner that a proxy is here.
+      allow:
+        - "10.8.0.0/24"   # BMS / SCADA segment
+        - "192.168.1.7"   # one engineering workstation
+
+      # BACnet/SC client allow-list, keyed by VMAC. Empty/omitted = every node
+      # the hub delivers is accepted (protection is opt-in, like `allow`). This
+      # is a second gate behind hub authentication, not a replacement for it.
+      # sc_allow:
+      #   - "02:00:00:00:00:0a"
+      #   - "02:00:00:00:00:0b"
+
+      # Per-client token bucket (requests/second, burst = rate). Protects the
+      # device from a polling storm and the proxy from a spoofed-source flood.
+      # 0/omitted = no limit.
+      rate_per_sec: 50
+
+      # Optional SHARED budget: the total request rate toward this device, all
+      # clients combined (requests/second, burst = rate). rate_per_sec is the
+      # per-client fairness control; this is the ceiling that protects a
+      # fragile device even when many well-behaved clients poll at once. A
+      # request already refused by its own per-client limit never charges the
+      # shared budget. 0/omitted = no shared budget.
+      # device_rate_per_sec: 200
+
+      # All-or-nothing write protection. A refused write is answered with a
+      # BACnet Error PDU (class security=4, code write-access-denied=40), so
+      # the client fails immediately instead of timing out. Mutually exclusive
+      # with write_policy below. If neither is set, writes pass through
+      # unchanged (protection is opt-in, like the other Shield proxies).
+      read_only: true
+
+      # Object/property-scoped writes instead of read_only:
+      #
+      # write_policy:
+      #   default: deny            # verdict for writes no rule covers
+      #   rules:
+      #     - oid: "analog-value:5:present-value"
+      #       action: allow        # one writable setpoint
+      #     - oid: "analog-value:*:present-value"
+      #       action: deny         # deny wins over allow
+      #     - oid: "*:*:present-value"
+      #       action: allow        # every present-value
+      #
+      # Rule vocabulary: <object-type>:<instance>:<property>, with "*" allowed
+      # in any part. Deny wins over allow, and an allow must cover the WHOLE
+      # write target: a WritePropertyMultiple that mixes an allowed and a
+      # forbidden target is denied as a unit. An undecodable or segmented write
+      # is denied too (fail closed).
+      #
+      # Service-level writes (CreateObject, DeleteObject, ReinitializeDevice,
+      # DeviceCommunicationControl, AddListElement, ...) have no object/property
+      # target to inspect; they are authorized only by the policy default.
+
+    # Optional BACnet/SC secure front leg for THIS device. The proxy attaches
+    # to an EXISTING hub as a node; it does not implement a hub. Omit this whole
+    # block to run the IP leg only. The clear device leg stays plain BACnet/IP.
+    # Each device with an sc block is its own SC node, so give each a distinct
+    # vmac.
+    #
+    # sc:
+    #   vmac: "02:00:00:00:00:01"                     # required, unicast, unique
+    #   uuid: "00112233-4455-6677-8899-aabbccddeeff"  # required
+    #   hubs:                                         # primary first, failover after
+    #     - "wss://hub1.example:47808/"
+    #     - "wss://hub2.example:47808/"
+    #   ca_file: "/etc/bacnet-shield/hub-ca.pem"      # optional; system roots if unset
+    #   cert_file: "/etc/bacnet-shield/node.pem"      # optional client certificate
+    #   key_file: "/etc/bacnet-shield/node.key"       # cert_file and key_file go together
+
+  # A second co-hosted device. Uncomment to protect two devices with one
+  # process, one config file and one metrics endpoint. Each listener needs its
+  # own local IP on port 47808.
+  #
+  # - name: ahu
+  #   listen_addr: "10.0.0.11:47808"
+  #   device_addr: "10.0.0.43:47808"
+  #   access:
+  #     allow: ["10.8.0.0/24"]
+  #     write_policy:
+  #       default: deny
+  #       rules:
+  #         - oid: "analog-value:*:present-value"
+  #           action: allow
 
 log_level: info # debug | info | warn | error
-
-# Optional BACnet/SC secure front leg. The proxy attaches to an EXISTING hub as
-# a node; it does not implement a hub. Omit this whole block to run the IP leg
-# only. The clear device leg stays plain BACnet/IP.
-#
-# sc:
-#   vmac: "02:00:00:00:00:01"                     # required, unicast, unique
-#   uuid: "00112233-4455-6677-8899-aabbccddeeff"  # required
-#   hubs:                                         # primary first, failover after
-#     - "wss://hub1.example:47808/"
-#     - "wss://hub2.example:47808/"
-#   ca_file: "/etc/bacnet-shield/hub-ca.pem"      # optional; system roots if unset
-#   cert_file: "/etc/bacnet-shield/node.pem"      # optional client certificate
-#   key_file: "/etc/bacnet-shield/node.key"       # cert_file and key_file go together
-
-access:
-  # Client allow-list (IPs or CIDRs). Empty/omitted = every client.
-  # An off-list datagram is dropped silently: answering it would tell a
-  # scanner that a proxy is here.
-  allow:
-    - "10.8.0.0/24"   # BMS / SCADA segment
-    - "192.168.1.7"   # one engineering workstation
-
-  # BACnet/SC client allow-list, keyed by VMAC. Empty/omitted = every node the
-  # hub delivers is accepted (protection is opt-in, like `allow`). This is a
-  # second gate behind hub authentication, not a replacement for it.
-  # sc_allow:
-  #   - "02:00:00:00:00:0a"
-  #   - "02:00:00:00:00:0b"
-
-  # Per-client token bucket (requests/second, burst = rate). Protects the
-  # device from a polling storm and the proxy from a spoofed-source flood.
-  # 0/omitted = no limit.
-  rate_per_sec: 50
-
-  # Optional SHARED budget: the total request rate toward the one device, all
-  # clients combined (requests/second, burst = rate). rate_per_sec is the
-  # per-client fairness control; this is the ceiling that protects a fragile
-  # device even when many well-behaved clients poll at once. A request already
-  # refused by its own per-client limit never charges the shared budget.
-  # 0/omitted = no shared budget.
-  # device_rate_per_sec: 200
-
-  # All-or-nothing write protection. A refused write is answered with a
-  # BACnet Error PDU (class security=4, code write-access-denied=40), so the
-  # client fails immediately instead of timing out. Mutually exclusive with
-  # write_policy below. If neither is set, writes pass through unchanged
-  # (protection is opt-in, like the other Shield proxies).
-  read_only: true
-
-  # Object/property-scoped writes instead of read_only:
-  #
-  # write_policy:
-  #   default: deny            # verdict for writes no rule covers
-  #   rules:
-  #     - oid: "analog-value:5:present-value"
-  #       action: allow        # one writable setpoint
-  #     - oid: "analog-value:*:present-value"
-  #       action: deny         # deny wins over allow
-  #     - oid: "*:*:present-value"
-  #       action: allow        # every present-value
-  #
-  # Rule vocabulary: <object-type>:<instance>:<property>, with "*" allowed
-  # in any part. Deny wins over allow, and an allow must cover the WHOLE
-  # write target: a WritePropertyMultiple that mixes an allowed and a
-  # forbidden target is denied as a unit. An undecodable or segmented write
-  # is denied too (fail closed).
-  #
-  # Service-level writes (CreateObject, DeleteObject, ReinitializeDevice,
-  # DeviceCommunicationControl, AddListElement, ...) have no object/property
-  # target to inspect; they are authorized only by the policy default.
 
 metrics:
   # Prometheus listener. Empty/omitted = metrics off. Bind it to loopback
   # unless the monitoring network is trusted: the scrape exposes counters
-  # only, but the port is another listener on the box.
+  # only, but the port is another listener on the box. Every counter carries a
+  # `device` label, so one scrape covers every co-hosted device.
   addr: "127.0.0.1:9203"
 
 # Optional structured audit stream. Off unless a file is set. Every security
 # decision the front leg makes (ACL, per-client rate, shared device budget,
 # write policy, unsupported subscription) is appended as one JSON object per
-# line, with the decoded object/property target of a refused write. The file
-# rotates at max_mb, keeping one backup, so disk use is bounded; a full
-# in-memory queue drops records and counts them rather than stalling the data
-# plane. The file is created 0600.
+# line, naming the device and, for a refused write, the decoded object/property
+# target. The file rotates at max_mb, keeping one backup, so disk use is
+# bounded; a full in-memory queue drops records and counts them rather than
+# stalling the data plane. The file is created 0600.
 #
 # audit:
 #   file: "/var/log/bacnet-shield/audit.jsonl"
