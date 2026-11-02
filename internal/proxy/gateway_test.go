@@ -2,14 +2,33 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.uber.org/zap"
 
 	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet"
+	"github.com/GalaxyGorilla/bacnet-shield/internal/observ"
 )
+
+// scrapeMetrics renders the gateway's real /metrics page. The private registry
+// is the only way to prove an instrument is both updated and registered, which
+// is what an operator actually depends on.
+func scrapeMetrics(t *testing.T, m *observ.Metrics) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metrics handler returned %d", rec.Code)
+	}
+	return rec.Body.String()
+}
 
 func TestGatewayReadProperty(t *testing.T) {
 	dev := newFakeDevice(t, "127.0.0.1")
@@ -166,9 +185,69 @@ func TestGatewayPendingExpires(t *testing.T) {
 	if got := testutil.ToFloat64(f.metrics.Pending); got != 0 {
 		t.Fatalf("pending gauge = %v after expiry", got)
 	}
+	if got := testutil.ToFloat64(f.metrics.RequestTimeouts); got != 1 {
+		t.Fatalf("request_timeouts = %v, want 1", got)
+	}
 
 	c.send(readProperty(8, oid, bacnet.PropertyPresentValue), f.addr())
 	dev.mustRecv(t, time.Second)
+}
+
+// TestGatewayForwardLatencyRecorded: the histogram must measure the client's
+// wait, not the proxy's processing time. A device that answers slowly has to
+// move the observation, otherwise the one metric that predicts client
+// timeouts would always look healthy.
+func TestGatewayForwardLatencyRecorded(t *testing.T) {
+	dev := newFakeDevice(t, "127.0.0.1")
+	f := startGateway(t, Config{DeviceAddr: dev.addr().String()}, nil)
+	c := newTestClient(t)
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 5}
+
+	c.send(readProperty(7, oid, bacnet.PropertyPresentValue), f.addr())
+	req, _, src := dev.mustRecv(t, time.Second)
+	time.Sleep(60 * time.Millisecond)
+	dev.send(t, readPropertyACK(req.InvokeID, oid, bacnet.PropertyPresentValue, []byte{0x44, 0x3F, 0x80, 0x00, 0x00}), src)
+	c.mustRecv(t, time.Second)
+
+	body := scrapeMetrics(t, f.metrics)
+	if !strings.Contains(body, "bacnet_shield_forward_latency_seconds_count 1") {
+		t.Fatalf("latency histogram did not record the answered request:\n%s", body)
+	}
+	// 60 ms lands in the 0.1 s bucket; a proxy-side microsecond measurement
+	// would have landed in 0.001 and proven nothing.
+	if !strings.Contains(body, `bacnet_shield_forward_latency_seconds_bucket{le="0.05"} 0`) ||
+		!strings.Contains(body, `bacnet_shield_forward_latency_seconds_bucket{le="0.1"} 1`) {
+		t.Fatalf("latency observation did not include the device's delay:\n%s", body)
+	}
+}
+
+// TestGatewaySegmentACKIsNotAnAnswer: a device that asks for the next segment
+// has not answered yet. Counting that as a completed exchange would make a
+// slow segmented read look fast and would inflate the response rate.
+func TestGatewaySegmentACKIsNotAnAnswer(t *testing.T) {
+	dev := newFakeDevice(t, "127.0.0.1")
+	f := startGateway(t, Config{DeviceAddr: dev.addr().String()}, nil)
+	c := newTestClient(t)
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 5}
+
+	c.send(readProperty(7, oid, bacnet.PropertyPresentValue), f.addr())
+	req, _, src := dev.mustRecv(t, time.Second)
+
+	dev.send(t, segmentACK(req.InvokeID, 0), src)
+	c.mustRecv(t, time.Second) // the SegmentACK is relayed to the client
+
+	body := scrapeMetrics(t, f.metrics)
+	if !strings.Contains(body, "bacnet_shield_forward_latency_seconds_count 0") {
+		t.Fatalf("a SegmentACK was counted as an answered request:\n%s", body)
+	}
+
+	// The final segment does complete the exchange.
+	dev.send(t, segmentedACK(req.InvokeID, 0, false, []byte{0x3E, 0x44, 0x3F, 0x80, 0x00, 0x00, 0x3F}), src)
+	c.mustRecv(t, time.Second)
+	body = scrapeMetrics(t, f.metrics)
+	if !strings.Contains(body, "bacnet_shield_forward_latency_seconds_count 1") {
+		t.Fatalf("the final segment did not complete the latency observation:\n%s", body)
+	}
 }
 
 func TestGatewayPendingGauge(t *testing.T) {
@@ -186,6 +265,81 @@ func TestGatewayPendingGauge(t *testing.T) {
 	c.mustRecv(t, time.Second)
 	if got := testutil.ToFloat64(f.metrics.Pending); got != 0 {
 		t.Fatalf("pending gauge = %v after response", got)
+	}
+}
+
+// TestShutdownDrainsInFlightRequest: a request already at the device must not
+// lose its answer because the operator restarted the service. The front leg
+// stops accepting, but the device leg and the client socket stay usable until
+// the request completes (bounded by drainGrace).
+func TestShutdownDrainsInFlightRequest(t *testing.T) {
+	dev := newFakeDevice(t, "127.0.0.1")
+	g, err := New(Config{
+		ListenAddr:     "127.0.0.1:0",
+		DeviceAddr:     dev.addr().String(),
+		RequestTimeout: 2 * time.Second,
+		MaxPending:     256,
+	}, nil, zap.NewNop(), observ.NewMetrics())
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = g.Serve(ctx) }()
+
+	c := newTestClient(t)
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 5}
+	c.send(readProperty(7, oid, bacnet.PropertyPresentValue), g.ClientAddr())
+	req, _, src := dev.mustRecv(t, time.Second)
+
+	cancel()
+	time.Sleep(100 * time.Millisecond) // Serve is now draining
+	dev.send(t, readPropertyACK(req.InvokeID, oid, bacnet.PropertyPresentValue, []byte{0x44, 0x3F, 0x80, 0x00, 0x00}), src)
+
+	got, _ := c.mustRecv(t, time.Second)
+	if got.Type != bacnet.PDUComplexACK || got.InvokeID != 7 {
+		t.Fatalf("drained answer = %s invoke %d, want complex-ack invoke 7", got.Type, got.InvokeID)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("gateway did not finish shutting down")
+	}
+}
+
+// TestShutdownStopsAcceptingNewRequests: the drain must not become a second
+// serving window. A datagram that arrives after cancellation is dropped, so a
+// client cannot keep the process alive by polling.
+func TestShutdownStopsAcceptingNewRequests(t *testing.T) {
+	dev := newFakeDevice(t, "127.0.0.1")
+	g, err := New(Config{
+		ListenAddr:     "127.0.0.1:0",
+		DeviceAddr:     dev.addr().String(),
+		RequestTimeout: 2 * time.Second,
+		MaxPending:     256,
+	}, nil, zap.NewNop(), observ.NewMetrics())
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	g.drainTimeout = 500 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = g.Serve(ctx) }()
+
+	c := newTestClient(t)
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 5}
+
+	c.send(readProperty(7, oid, bacnet.PropertyPresentValue), g.ClientAddr())
+	dev.mustRecv(t, time.Second)
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	c.send(readProperty(8, oid, bacnet.PropertyPresentValue), g.ClientAddr())
+	dev.expectNothing(t, 250*time.Millisecond)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("gateway did not finish shutting down")
 	}
 }
 

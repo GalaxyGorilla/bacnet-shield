@@ -98,7 +98,7 @@ label). The instruments that matter operationally:
 | Client traffic | `bacnet_shield_requests_total` | a drop to zero (clients repointed away, or a network change) |
 | Forwarding | `bacnet_shield_forwarded_total`, `bacnet_shield_responses_total` | a widening gap between the two (device not answering) |
 | Policy | `bacnet_shield_acl_denied_total`, `bacnet_shield_rate_limited_total`, `bacnet_shield_device_rate_limited_total`, `bacnet_shield_writes_denied_total` | a sudden ACL or write-denial spike (misconfigured client, or an incident); a rising device-budget denial (the pollers together exceed what the device should see) |
-| Device health | `bacnet_shield_pending`, `bacnet_shield_pending_full_total`, `bacnet_shield_parse_errors_total` | `pending` climbing toward `max_pending`; parse errors (a misbehaving peer) |
+| Device health | `bacnet_shield_pending`, `bacnet_shield_pending_full_total`, `bacnet_shield_parse_errors_total`, `bacnet_shield_request_timeouts_total`, `bacnet_shield_forward_latency_seconds` | `pending` climbing toward `max_pending`; timeouts climbing; the latency histogram's upper buckets filling (a slow or wedged device) |
 | Retransmissions | `bacnet_shield_replayed_total`, `bacnet_shield_retransmits_dropped_total` | a rising dropped count (lossy path or a client retrying during a slow device) |
 | COV | `bacnet_shield_cov_subscriptions`, `bacnet_shield_notifications_dropped_total` | notifications with no subscriber (a client that stopped without cancelling) |
 | SC link | `bacnet_shield_sc_connected`, `bacnet_shield_sc_reconnects_total` | `sc_connected` at 0 during an outage; reconnects climbing |
@@ -167,6 +167,12 @@ There is no persistent on-disk state (no engine store, no cache), so a restart i
 safe and fast: the pending table, replay cache and COV subscriptions are all
 in-memory and rebuilt by traffic. Keep the config and any SC key files across the
 upgrade.
+
+On `SIGTERM`/`SIGINT` the front leg stops accepting immediately but waits up to
+two seconds for requests already at the device to be answered, so a restart does
+not turn an in-flight write into a client timeout. The device leg and the SC
+transport stay alive for that drain. A datagram that arrives after the signal is
+dropped, so a client that keeps polling cannot delay shutdown.
 
 ## Security notes
 

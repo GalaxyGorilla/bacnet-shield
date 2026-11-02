@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -232,18 +233,27 @@ func runGateway(args []string) int {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// The SC transport outlives the gateway's accepting phase by one drain:
+	// a client's write that is already at the device must still get its ACK
+	// after SIGTERM, and that ACK travels back through the hub.
+	scCtx, cancelSC := context.WithCancel(context.Background())
+	defer cancelSC()
+
 	served := make(chan struct{})
 	go func() {
 		defer close(served)
 		_ = runner.Serve(ctx)
 	}()
+	var scWG sync.WaitGroup
 	for _, rd := range devices {
 		if rd.sc == nil {
 			continue
 		}
 		rd := rd
+		scWG.Add(1)
 		go func() {
-			if err := rd.sc.Run(ctx); err != nil && ctx.Err() == nil {
+			defer scWG.Done()
+			if err := rd.sc.Run(scCtx); err != nil && scCtx.Err() == nil {
 				log.Error("bacnet/sc node stopped", zap.String("device", rd.dev.Name), zap.Error(err))
 			}
 		}()
@@ -300,12 +310,19 @@ func runGateway(args []string) int {
 				continue
 			}
 			log.Info("shutdown signal received", zap.String("signal", sig.String()))
+			// Stop accepting, let already-forwarded requests finish (the
+			// gateway bounds this), then tear down the SC transport that
+			// carries their answers.
 			cancel()
 			<-served
+			cancelSC()
+			scWG.Wait()
 			return 0
 		case <-served:
 			// Serve only returns after cancellation; reaching here without
 			// a signal means it stopped on its own.
+			cancelSC()
+			scWG.Wait()
 			return 0
 		}
 	}

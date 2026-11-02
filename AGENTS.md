@@ -99,7 +99,14 @@ them. Inside one gateway:
    to the client's invoke ID, cached as an NPDU if complete, and sent through
    that peer's link layer.
 5. The sweeper expires pending requests, replay entries, device exchanges,
-   COV subscriptions and idle clients once per second.
+   COV subscriptions and idle clients once per second. An expired request that
+   was never answered increments `bacnet_shield_request_timeouts_total`.
+6. On shutdown the gateway stops reading the client leg, keeps the device leg
+   and the client socket open for a bounded drain (2 s), and only then closes
+   both. A request already at the device still gets its answer; a datagram that
+   arrives after cancellation does not start a new exchange. The command keeps
+   the SC nodes alive until that drain finishes, so an SC client's answer can
+   still travel through the hub.
 
 ### State tables (all bounded, one set per device)
 
@@ -247,6 +254,12 @@ Done in v1:
 - Device source validation with a learned source port.
 - CLI, config validation, `SIGHUP` reload, systemd watchdog, selftest probe.
 - Metrics, logger, panic isolation, soak tests.
+- Forward-latency histogram (`bacnet_shield_forward_latency_seconds`, measured
+  from forwarding to the answering response, with SegmentACKs and intermediate
+  segments excluded) and `bacnet_shield_request_timeouts_total`.
+- Graceful shutdown: the front leg stops accepting, already-forwarded requests
+  drain for up to 2 s (the device leg and client socket stay open), and the SC
+  transport outlives that drain. A new datagram after cancellation is dropped.
 - Opt-in structured audit stream (`internal/observ`): one JSON record per
   security decision with the decoded write target and a closed-set reason,
   bounded by a rotating audit file and a non-blocking drop-and-count queue.

@@ -28,6 +28,7 @@ type pendingReq struct {
 	segmented bool
 	complete  bool // a segmented response finished; only the final SegmentACK is still expected
 	fwd       []byte
+	started   time.Time // when the request was first forwarded, for the latency histogram
 	deadline  time.Time
 	cov       *covIntent
 }

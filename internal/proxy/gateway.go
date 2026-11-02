@@ -101,6 +101,13 @@ const (
 	// not routed, and the client sees no notifications (the same visible
 	// result as a device that never notifies).
 	maxSubscriptions = 4096
+	// drainGrace bounds how long shutdown waits for already-forwarded
+	// requests to be answered. A building controller must not lose a write
+	// because the service was restarted between the request and its ACK,
+	// but a wedged device must not hold the process open either. Two
+	// seconds covers a slow LAN round trip; the rest of the request timeout
+	// is the client's problem, not shutdown's.
+	drainGrace = 2 * time.Second
 )
 
 // Gateway is one running proxy instance.
@@ -130,7 +137,13 @@ type Gateway struct {
 	subCount   int
 
 	closeOnce sync.Once
+	draining  atomic.Bool
 	wg        sync.WaitGroup
+
+	// drainTimeout bounds the shutdown drain. New sets it to drainGrace;
+	// tests shorten it so an unanswered request does not make every test
+	// wait two seconds.
+	drainTimeout time.Duration
 }
 
 // New resolves the device, binds both legs, and returns a gateway ready for
@@ -178,22 +191,23 @@ func New(cfg Config, pol *access.Policy, log *zap.Logger, m *observ.Metrics) (*G
 		return nil, fmt.Errorf("proxy: bind device leg: %w", err)
 	}
 	g := &Gateway{
-		cfg:        cfg,
-		name:       cfg.DeviceName,
-		log:        log,
-		metrics:    m,
-		audit:      cfg.Audit,
-		clientConn: clientConn,
-		deviceConn: deviceConn,
-		deviceAddr: deviceAddr,
-		deviceIP:   deviceAddr.IP.To4(),
-		pending:    make(map[byte]*pendingReq),
-		byClient:   make(map[clientKey]byte),
-		done:       make(map[clientKey]*completed),
-		fromDevice: make(map[byte]*deviceExchange),
-		toDevice:   make(map[clientKey]byte),
-		clients:    make(map[string]*clientState),
-		cov:        make(map[bacnet.ObjectID]map[covSubKey]*subscription),
+		cfg:          cfg,
+		name:         cfg.DeviceName,
+		log:          log,
+		metrics:      m,
+		audit:        cfg.Audit,
+		clientConn:   clientConn,
+		deviceConn:   deviceConn,
+		deviceAddr:   deviceAddr,
+		deviceIP:     deviceAddr.IP.To4(),
+		pending:      make(map[byte]*pendingReq),
+		byClient:     make(map[clientKey]byte),
+		done:         make(map[clientKey]*completed),
+		fromDevice:   make(map[byte]*deviceExchange),
+		toDevice:     make(map[clientKey]byte),
+		clients:      make(map[string]*clientState),
+		cov:          make(map[bacnet.ObjectID]map[covSubKey]*subscription),
+		drainTimeout: drainGrace,
 	}
 	g.policy.Store(pol)
 	return g, nil
@@ -217,8 +231,9 @@ func (g *Gateway) Name() string { return g.name }
 // a SIGHUP reload uses it.
 func (g *Gateway) SetPolicy(p *access.Policy) { g.policy.Store(p) }
 
-// Serve runs both read loops until ctx is cancelled, then closes the sockets.
-// A bind error is reported by New, so Serve only returns after shutdown.
+// Serve runs both read loops until ctx is cancelled, then drains in-flight
+// requests and closes the sockets. A bind error is reported by New, so Serve
+// only returns after shutdown.
 func (g *Gateway) Serve(ctx context.Context) error {
 	g.wg.Add(3)
 	safego.Go(g.log, "gateway client loop", func() { defer g.wg.Done(); g.clientLoop(ctx) })
@@ -226,9 +241,42 @@ func (g *Gateway) Serve(ctx context.Context) error {
 	safego.Go(g.log, "gateway sweeper", func() { defer g.wg.Done(); g.sweepLoop(ctx) })
 
 	<-ctx.Done()
+	g.drain()
 	g.Close()
 	g.wg.Wait()
 	return nil
+}
+
+// drain stops accepting new front-leg datagrams and waits, briefly, for the
+// device to answer requests that were already forwarded. The client socket
+// stays open for writing: closing it would also destroy the answers the drain
+// is waiting for. A read deadline is the only way to interrupt a blocked UDP
+// read without closing the socket.
+func (g *Gateway) drain() {
+	g.draining.Store(true)
+	_ = g.clientConn.SetReadDeadline(time.Now())
+	grace := g.drainTimeout
+	if grace <= 0 {
+		grace = drainGrace
+	}
+	deadline := time.Now().Add(grace)
+	for {
+		g.mu.Lock()
+		open := 0
+		for _, p := range g.pending {
+			// A request whose data was already delivered is only waiting
+			// for the client's final SegmentACK; it is not worth holding
+			// shutdown open for.
+			if !p.complete {
+				open++
+			}
+		}
+		g.mu.Unlock()
+		if open == 0 || !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // Close closes both sockets. It is idempotent.
@@ -294,6 +342,13 @@ func (g *Gateway) sweep(now time.Time) {
 
 	for id, p := range g.pending {
 		if now.After(p.deadline) {
+			// A request that got its data but is only waiting for the
+			// client's final SegmentACK is not an unanswered request;
+			// counting it would make a slow client look like a dead
+			// device.
+			if !p.complete {
+				g.metrics.RequestTimeouts.Inc()
+			}
 			g.dropPendingLocked(id)
 			g.log.Debug("request timed out", zap.Uint8("device_invoke_id", id),
 				zap.Stringer("client", p.client))

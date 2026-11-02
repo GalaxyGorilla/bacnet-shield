@@ -10,13 +10,13 @@ local `make` target.
 | Fuzzing | Nine native targets: `FuzzParseBVLC`, `FuzzParseNPDU`, `FuzzParseAPDU`, `FuzzParseObjectID`, `FuzzWriteTargets`, `FuzzTagReader`, `FuzzParse` and `FuzzDecodeMessage` (BVLL-SC), and `FuzzParseFrame` (WebSocket) |
 | Policy | Allow-list, per-client rate limit, optional shared per-device budget, read-only, scoped write rules, deny-overrides, allow-must-cover, service-level writes; SC VMAC allow-list and per-VMAC bucket |
 | Audit | JSON-lines writer with time-stamping and omitted empty fields; rotation cap and one-backup bound; drop-and-count under a blocked sink; served end-to-end for a refused write (with decoded target and reason), an ACL denial on each leg, and an unsupported subscription; `ServiceName` for both service-number spaces |
-| Data plane | Real loopback UDP sockets, invoke-ID collision and reuse, retransmission dedupe, pending cap/expiry, routing strip, device source validation |
+| Data plane | Real loopback UDP sockets, invoke-ID collision and reuse, retransmission dedupe, pending cap/expiry, routing strip, device source validation, forward-latency histogram, request-timeout counting |
 | Co-hosting | Two listener↔device pairs in one process: each listener reaches its own device (Who-Is/I-Am), a read-only policy on one device does not gate the other, both `device` labels appear on one shared scrape, and a bind conflict fails startup |
 | SC transport | Real in-process TLS 1.3 hub: connect handshake, heartbeat and heartbeat *timeout* (a hub that stops ACKing is dropped), reconnect and failover across a hub list, hostname verification, destination/origin filtering, attach/detach state reporting, and survival of a malformed frame and a non-binary WebSocket message |
 | SC data plane | In-memory SC leg: two clients with the same invoke ID, an IP and an SC client sharing an invoke ID, per-VMAC ACL/rate, per-leg rate isolation, write denial shape, COV routing, I-Am fan-out, replay served across the leg boundary, shared pending |
 | COV | Subscription install after ACK, rejected subscription not routed, cancellation, expiry, multi-client fan-out, unroutable confirmed notification |
 | Segments | Segmented responses and device requests relayed with per-invoke tracking; segmented writes denied; a real peer's multi-segment response is reassembled through the proxy (`make interop`) |
-| Lifecycle | Config validation, reload, restart-only warnings, invalid reload, shutdown, systemd readiness and watchdog; SC config validation and TLS file errors |
+| Lifecycle | Config validation, reload, restart-only warnings, invalid reload, shutdown drain (an already-forwarded request still gets its answer, a new datagram after cancellation does not), systemd readiness and watchdog; SC config validation and TLS file errors |
 | Independent peer | bacpypes3 0.0.110 drives the built binary as both client and device; BVLL-SC golden bytes come from the same peer; bacnet-stack 1.6.1's `sc-hub` + BSC clients drive the built binary over BACnet/SC (`make interop-sc`), including a COV subscriber |
 | Soak | Spoofed-source rate-limit flood; steady-state forwarding with flat goroutines/heap and zero unanswered requests |
 
@@ -64,6 +64,13 @@ as failures.
 - A device response from an unexpected source is rejected; a changed source
   port is learned only after a legitimate response.
 - A malformed datagram costs one datagram, not the process.
+- A request already at the device when `SIGTERM` arrives is still answered
+  (bounded by a two-second drain); a datagram that arrives after cancellation
+  is dropped, so polling cannot keep the process alive.
+- A request that expires without an answer increments
+  `bacnet_shield_request_timeouts_total`; a response that answers it feeds the
+  `bacnet_shield_forward_latency_seconds` histogram with the client's wait, and
+  a SegmentACK or intermediate segment is not counted as an answer.
 - Two SC nodes using the same invoke ID get their own answers addressed to
   their own VMAC; a node's frame addressed to another VMAC or with no origin is
   dropped.

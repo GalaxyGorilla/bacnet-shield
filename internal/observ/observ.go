@@ -55,6 +55,7 @@ type Metrics struct {
 	Replayed             prometheus.Counter
 	Retransmits          prometheus.Counter
 	NotificationsDropped prometheus.Counter
+	RequestTimeouts      prometheus.Counter
 	AuditDropped         prometheus.Counter
 
 	Pending       prometheus.Gauge
@@ -62,6 +63,12 @@ type Metrics struct {
 	SCConnected   prometheus.Gauge
 
 	SCReconnects prometheus.Counter
+
+	// ForwardLatency measures a confirmed request from the moment it is
+	// forwarded to the device until the response that answers it arrives
+	// (the final segment for a segmented response). It is the one metric
+	// that shows a slow device before clients start timing out.
+	ForwardLatency prometheus.Histogram
 }
 
 // NewRegistry builds a fresh registry with the process-wide Go and process
@@ -103,6 +110,18 @@ func NewMetricsForDevice(reg *prometheus.Registry, device string) *Metrics {
 	g := func(name, help string) prometheus.GaugeOpts {
 		return prometheus.GaugeOpts{Name: name, Help: help, ConstLabels: cl}
 	}
+	h := func(name, help string) prometheus.HistogramOpts {
+		return prometheus.HistogramOpts{
+			Name:        name,
+			Help:        help,
+			ConstLabels: cl,
+			// BACnet request/response on a building LAN is
+			// milliseconds; a slow controller or a serial gateway is
+			// seconds. The buckets cover both without inventing a
+			// microsecond-resolution instrument.
+			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+		}
+	}
 	f := promauto.With(reg)
 	return &Metrics{
 		reg:                  reg,
@@ -119,10 +138,12 @@ func NewMetricsForDevice(reg *prometheus.Registry, device string) *Metrics {
 		Replayed:             f.NewCounter(c("bacnet_shield_replayed_total", "Retransmissions answered from the finished-response cache.")),
 		Retransmits:          f.NewCounter(c("bacnet_shield_retransmits_dropped_total", "Retransmissions dropped because the request is still in flight.")),
 		NotificationsDropped: f.NewCounter(c("bacnet_shield_notifications_dropped_total", "Device notifications with no client to receive them.")),
+		RequestTimeouts:      f.NewCounter(c("bacnet_shield_request_timeouts_total", "Forwarded requests that expired without a complete answer.")),
 		Pending:              f.NewGauge(g("bacnet_shield_pending", "Requests currently in flight toward the device.")),
 		Subscriptions:        f.NewGauge(g("bacnet_shield_cov_subscriptions", "Active COV subscriptions routed by the proxy.")),
 		SCConnected:          f.NewGauge(g("bacnet_shield_sc_connected", "1 while the BACnet/SC leg is attached to a hub, 0 otherwise.")),
 		SCReconnects:         f.NewCounter(c("bacnet_shield_sc_reconnects_total", "Successful re-attaches to a hub after the first connection.")),
+		ForwardLatency:       f.NewHistogram(h("bacnet_shield_forward_latency_seconds", "Time from forwarding a confirmed request to the response that answers it.")),
 	}
 }
 

@@ -38,6 +38,10 @@ func startGateway(t *testing.T, cfg Config, pol *access.Policy) *fixture {
 	if err != nil {
 		t.Fatalf("proxy.New: %v", err)
 	}
+	// Most tests leave a request unanswered on purpose; a full two-second
+	// drain on cleanup would turn the suite into a coffee break. The
+	// dedicated shutdown tests keep the production default.
+	g.drainTimeout = 100 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

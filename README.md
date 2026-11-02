@@ -481,11 +481,13 @@ no device label.
 | `bacnet_shield_replayed_total` | Retransmissions answered from the finished-response cache |
 | `bacnet_shield_retransmits_dropped_total` | Retransmissions dropped while the request is in flight |
 | `bacnet_shield_notifications_dropped_total` | Device notifications with no client to receive them |
+| `bacnet_shield_request_timeouts_total` | Forwarded requests that expired without a complete answer |
 | `bacnet_shield_audit_dropped_total` | Audit records dropped because the audit queue was full |
 | `bacnet_shield_pending` | Requests currently in flight toward the device |
 | `bacnet_shield_cov_subscriptions` | Active COV subscriptions routed by the proxy |
 | `bacnet_shield_sc_connected` | 1 while the BACnet/SC leg is attached to a hub, 0 otherwise |
 | `bacnet_shield_sc_reconnects_total` | Successful re-attaches to a hub after the first connection |
+| `bacnet_shield_forward_latency_seconds` | Histogram from forwarding a confirmed request to the response that answers it |
 
 ## Appliance deployment
 
@@ -498,6 +500,11 @@ no device label.
   The binary sends `READY=1` only after both sockets bind and pings
   `WATCHDOG=1` while running, so a bind failure is never advertised as ready and
   a wedged process is restarted by the host.
+- **Graceful restart** — on `SIGTERM` the front leg stops accepting and waits
+  up to two seconds for requests already at the device to be answered, so a
+  restart does not turn an in-flight write into a client timeout. The device
+  leg stays open for that drain; the BACnet/SC transport outlives it by the
+  same window so the answer can still travel through the hub.
 - **Supply chain** — `make sbom` produces SPDX + CycloneDX documents for the
   release binary (`syft`); `make vulnscan` scans them with `grype` and fails on
   HIGH or worse. Both exit 77 when the tool is missing.

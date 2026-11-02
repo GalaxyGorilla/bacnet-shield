@@ -96,6 +96,14 @@ func (g *Gateway) handleDeviceResponse(a bacnet.APDU, n bacnet.NPDU, src *net.UD
 	}
 	npdu := buildNPDU(n, apdu)
 
+	// A SegmentACK is not an answer, and an intermediate segment is not the
+	// end of one; every other response completes the exchange from the
+	// client's point of view (the final segment carries the last data). The
+	// histogram therefore measures what a client experiences, not the
+	// proxy's own processing time.
+	answered := a.Type != bacnet.PDUSegmentACK && !(a.Segmented && a.MoreFollows)
+	latency := now.Sub(p.started)
+
 	complete := true
 	switch {
 	case a.Type == bacnet.PDUSegmentACK:
@@ -126,6 +134,9 @@ func (g *Gateway) handleDeviceResponse(a bacnet.APDU, n bacnet.NPDU, src *net.UD
 	client := p.client
 	g.mu.Unlock()
 
+	if answered {
+		g.metrics.ForwardLatency.Observe(latency.Seconds())
+	}
 	g.metrics.Responses.Inc()
 	g.sendClientNPDU(npdu, client)
 }

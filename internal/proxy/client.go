@@ -107,6 +107,13 @@ func (g *Gateway) handleClientNPDU(npdu []byte, p peer, now time.Time, pol *acce
 
 // handleClientConfirmed gates and forwards a confirmed request.
 func (g *Gateway) handleClientConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, now time.Time, pol *access.Policy) {
+	// Shutdown has started: the front leg is draining, not serving. A
+	// datagram that was already in the socket buffer when the signal
+	// arrived must not start a new exchange that shutdown would then cut
+	// off mid-flight.
+	if g.draining.Load() {
+		return
+	}
 	// SubscribeCOVPropertyMultiple carries a list of subscriptions. v1
 	// tracks one monitored object per subscription, so it cannot route the
 	// notifications of a multiple subscription. Denying it with a BACnet
@@ -261,6 +268,7 @@ func (g *Gateway) forwardConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, now tim
 		hash:      hash,
 		segmented: a.Segmented,
 		fwd:       frame,
+		started:   now,
 		deadline:  now.Add(g.cfg.RequestTimeout),
 		cov:       intent,
 	}
@@ -276,6 +284,9 @@ func (g *Gateway) forwardConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, now tim
 // WriteGroup, TimeSynchronization, ...). Unconfirmed writes still change the
 // device, so the policy gates them before anything leaves the box.
 func (g *Gateway) handleClientUnconfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, pol *access.Policy) {
+	if g.draining.Load() {
+		return
+	}
 	if allowed, reason := pol.WriteVerdict(a); !allowed {
 		g.metrics.WritesDenied.Inc()
 		targets := writeTargetStrings(a)
