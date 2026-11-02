@@ -119,7 +119,7 @@ The evaluation rules are intentionally identical across the Shield proxies:
 | **Allow must cover** | An allow authorizes a request only if it matches every object/property the request touches. |
 | **Uncovered takes the default** | `default: deny` is an allow-list; `default: allow` is a deny-list. |
 | **Fail closed on the undecodable** | A write whose target cannot be decoded is denied, never forwarded "because we could not tell". |
-| **Segmented writes are denied** | The policy would see only the first segment, so a client could hide a forbidden target in a later one. |
+| **Segmented writes are reassembled first** | The policy sees the complete request, so a forbidden target hidden in a later segment is still denied; a segmented write over the 16 KiB reassembly bound or out of order is refused. |
 | **Service-level writes need the default** | CreateObject, DeleteObject, ReinitializeDevice, DeviceCommunicationControl, file writes and list edits have no object target to inspect; only `default: allow` authorizes them. |
 
 Flags equivalent:

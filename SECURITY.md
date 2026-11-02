@@ -53,7 +53,10 @@ still return plausible false process data.
   without a nonzero origin, even if the hub delivered it.
 - Read-only mode or an `<object-type>:<instance>:<property>` write policy with
   deny-overrides and allow-must-cover semantics.
-- Undecodable and segmented writes are denied fail-closed, before forwarding.
+- Undecodable writes are denied fail-closed, before forwarding. A segmented
+  write is acknowledged segment by segment, reassembled, authorized as a whole
+  and only then forwarded as one request; over-limit and out-of-order transfers
+  are refused.
 - Invoke-ID translation per client, a bounded pending table, retransmission
   dedupe and a completed-response replay cache; a resent request never reaches
   the device twice while it is in flight.

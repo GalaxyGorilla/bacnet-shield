@@ -150,7 +150,7 @@ leave the device unprotected or wide open.
 | Every request times out, `forwarded` rises but `responses` stays flat | Device unreachable or wrong `device_addr` | `bacnet-shield selftest`; `device_addr` is unicast IPv4; a NAT/firewall between box and device |
 | Device answers a client that uses a different source port | Device replies from a different port than it was queried on | Expected: the proxy validates the device by **IP** and learns the response port; pin `device_local_addr` only for a firewall rule |
 | A write still reaches the device | No `read_only` and no `write_policy` configured | Protection is opt-in; set one of them explicitly |
-| A legitimate write is refused | The rule does not cover every target, or a segmented write | `writes_denied_total`; check the rule covers the whole WritePropertyMultiple |
+| A legitimate write is refused | The rule does not cover every target, or a segmented write exceeded the 16 KiB reassembly bound | `writes_denied_total`, `segmented_writes_rejected_total`; check the rule covers the whole WritePropertyMultiple |
 | Same invoke ID from two clients gets one answer | (should not happen) | invoke-ID translation is per client; file a bug with the peer keys and invoke ID |
 | SC clients never connect | Hub URL, TLS trust, or identity | `sc_connected`; the log shows the dial/handshake failure and the hub URL |
 | SC reconnects keep climbing | Unstable hub or network | hub logs; the node backs off 1–30 s and walks the hub list |

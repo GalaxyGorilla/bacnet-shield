@@ -162,7 +162,9 @@ route and gate).
 - Writes outside a `write_policy` rule: **refused** the same way. Deny rules win
   over allow rules, an allow rule must cover the WHOLE write target (a
   WritePropertyMultiple cannot straddle an allowed rule), and a write whose
-  target cannot be decoded — or a segmented write — is denied.
+  target cannot be decoded is denied. A segmented write is reassembled first,
+  so every target is visible; an over-limit or out-of-order transfer is
+  refused rather than guessed at.
 - Clients outside `allow`: **silent drop**. An off-list peer must not learn a
   proxy is there, and an error answer would only amplify a flood.
 - Bursts above `rate_per_sec`: **silent drop**, for the same reason.
