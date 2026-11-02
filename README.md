@@ -91,7 +91,10 @@ Not always. Prefer the simplest boundary that solves the problem:
 - **You need a BACnet router, a BBMD, or a protocol translator** — bacnet-shield
   is a transport-level security gate for **one** device; it does not route
   between networks or remap the object model. Use a building-controller gateway
-  for that.
+  for that. A client that can only reach the proxy through a BBMD
+  (`Forwarded-NPDU`) is rejected by design; see
+  [docs/b3-bbmd.md](docs/b3-bbmd.md) for the trust reason and the deployment
+  shapes that avoid it.
 
 Use bacnet-shield when the legacy device cannot change and you need an
 appliance-like security gate in front of it: an allow-list, a per-client rate
@@ -599,6 +602,8 @@ the SC transport is also proven against a third-party implementation.
 - [`TESTING.md`](TESTING.md) — test layers and release/security gates.
 - [`CONFORMANCE.md`](CONFORMANCE.md) — independent-peer results, divergences
   and deliberate limits.
+- [`docs/b3-bbmd.md`](docs/b3-bbmd.md) — why BBMD/forwarded-NPDU clients are
+  rejected and what a future trusted-BBMD mode would have to guarantee.
 - [`BACKLOG.md`](BACKLOG.md) — what is planned and what is explicitly out of
   scope.
 - [`AGENTS.md`](AGENTS.md) — architecture, wire-level invariants and the

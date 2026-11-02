@@ -359,7 +359,11 @@ Known boundaries:
   `NotImplementedError` for IPv6), so the IPv6 path is pinned by wire-level Go
   tests and a fuzz target.
 - No BBMD/router and no traffic between co-hosted devices; each entry is an
-  isolated listener↔device pair.
+  isolated listener↔device pair. `Forwarded-NPDU` and foreign-device frames
+  are rejected: accepting them would replace a verified source address with an
+  address the BBMD claims, changing the allow-list's meaning. A future explicit
+  `trusted_bbmd` mode and its trust trade-off are designed in
+  [docs/b3-bbmd.md](docs/b3-bbmd.md).
 - Segmented *write* reassembly: the proxy acknowledges the client's segments,
   authorizes the complete request, and forwards one unsegmented APDU. A
   forbidden target in a later segment is still seen, a denied write gets the

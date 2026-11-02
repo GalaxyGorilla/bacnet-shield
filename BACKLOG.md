@@ -117,11 +117,17 @@ Adding/removing a device is restart-only. Flags mode stays single-device. See
 
 ### B3 — BBMD / forwarded-NPDU clients
 
-A client behind a BBMD sends `Forwarded-NPDU` (BVLC `0x04`) or registers as a
-foreign device (`0x05`). v1 counts these as unsupported. Supporting them means
-trusting a BBMD identity, handling the 6-byte original source, and deciding
-whether the proxy itself should register with a BBMD. This is network
-infrastructure, not a device property; design it explicitly or leave it out.
+**Decision: not implemented.** A client behind a BBMD sends `Forwarded-NPDU`
+(BVLC `0x04`) or registers as a foreign device (`0x05`); the proxy counts these
+as unsupported. Accepting the frame would replace a kernel-verified source
+address with a client address the BBMD *claims* in the payload, so it changes
+the allow-list from a source-IP guarantee to a trust statement about the
+BBMD. The only honest shape is an explicit per-device `trusted_bbmd` mode,
+checked against the claimed origin, with audit marked as `bbmd`-attested — and
+that is a security-model decision, not a parser change. It is deliberately
+deferred until a deployment requires it. The full reasoning, the required
+guarantees and the deployment shapes that avoid B3 are in
+[docs/b3-bbmd.md](docs/b3-bbmd.md).
 
 ### B4 — Multi-object COV subscriptions
 
