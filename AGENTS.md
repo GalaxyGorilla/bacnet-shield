@@ -20,9 +20,9 @@ Deployment model (co-hosting, one process, N independent pairs):
 ```
 
 Clients are repointed to the proxy once; the devices stay unchanged and keep
-speaking plain BACnet/IP. Each `devices:` entry is its own front leg, device
-leg and policy; no datagram crosses between entries. The proxy is each device's
-security gate: client allow-list, per-client rate limit, and
+speaking plain BACnet/IP (IPv4 or IPv6). Each `devices:` entry is its own front
+leg, device leg and policy; no datagram crosses between entries. The proxy is
+each device's security gate: client allow-list, per-client rate limit, and
 object/property-scoped write protection. It is **not** a BACnet device stack, a
 BBMD, a router, or an SC hub.
 
@@ -47,8 +47,8 @@ rewritten, and only the front-leg policy can reject a request.
 | Front-leg identity | One `peer` abstraction (`Key`, `IP`, `SendNPDU`) keyed by `ip:port` on the IP leg and `sc:<vmac>` on the SC leg. The data plane and its replay cache hold **NPDUs**, not link frames, so both legs share pending, replay, COV and write policy. Never key SC state by connection |
 | SC client admission | Opt-in SC allow-list keyed by **VMAC** (`access.sc_allow`). With none configured, any node the hub delivers is accepted and only the write policy gates it (same "protection is opt-in" shape as the IP leg). UUID-keyed rules cannot be enforced through a hub; a UUID entry is rejected rather than silently ignored |
 | SC transport | TLS 1.3 (`crypto/tls`) + a small, fuzzed WebSocket frame parser we own, not a WebSocket dependency. The proxy is always the WebSocket client. The hub is trusted to attribute frames to their originating VMAC; the node still drops a frame addressed to another VMAC or with a zero/missing origin |
-| Device leg | Always plain BACnet/IPv4 over UDP, even when the front leg is SC or IPv6. The SC and IPv6 legs are additive, not a replacement for the IPv4 listener |
-| IPv6 front leg | Opt-in by using an IPv6 literal in `listen_addr`. Parse BACnet/IPv6 (Annex U, link type `0x82`, 3-octet virtual addresses, address resolution), reduce the frame to its NPDU, and use the same data plane. The proxy derives its own virtual address from the bound listener; the device leg stays IPv4 |
+| Device leg | Plain BACnet/IPv4 or BACnet/IPv6 over UDP, independent of the front leg. The SC front leg is additive. An IPv6 device leg discovers the device's 3-octet virtual address with `VirtualAddressResolution` (and learns it from any frame the device sends); requests are dropped until it is known, never sent with a guessed address |
+| IPv6 legs | Opt-in by using an IPv6 literal in `listen_addr` and/or `device_addr`. Parse/serve BACnet/IPv6 (Annex U, link type `0x82`, 3-octet virtual addresses, address resolution) on either leg, reduce a frame to its NPDU, and use the same data plane. `device_local_addr` must match the device's family. All four v4/v6 combinations are supported |
 | Ground truth | ASHRAE 135 wire formats, cross-checked against **bacpypes3 0.0.110** in `.venv`. Vendor divergence is reported in [CONFORMANCE.md](CONFORMANCE.md), never silently adapted away in the proxy |
 | Audit | Opt-in structured stream (`audit.file`), one JSON object per security decision (ACL, rate, device budget, write policy, unsupported subscription), with the decoded target and a closed-set reason for a refused write. Bounded stream: a rotating file (one backup) plus a bounded non-blocking queue that drops-and-counts. Observes decisions; never changes them |
 | No CI | Deliberate user decision across the Shield projects. Gates are local `make` targets |
@@ -130,11 +130,14 @@ them. Inside one gateway:
 - BACnet/IPv6 frames use link type `0x82`, not `0x81`: Original-Unicast is
   function `0x01` with a 3-octet source and destination virtual address,
   Original-Broadcast is `0x02` with a source only. A frame of the wrong family
-  is a parse error, never guessed at. VirtualAddressResolution (`0x06`) and
-  AddressResolution (`0x03`) are answered at the link layer for an admitted
-  client; every other IPv6 function (Forwarded-NPDU, foreign-device,
-  Distribute-Broadcast) is counted unsupported. The NPDU inside is the same
-  network/application payload, which is why both legs share one data plane.
+  is a parse error, never guessed at. On the front leg, VirtualAddressResolution
+  (`0x06`) and AddressResolution (`0x03`) are answered for an admitted client.
+  On an IPv6 device leg the proxy is the requester: it sends
+  VirtualAddressResolution and uses the ACK's source virtual address; until that
+  is known, requests are dropped rather than sent with a guessed address. Every
+  other IPv6 function (Forwarded-NPDU, foreign-device, Distribute-Broadcast) is
+  counted unsupported. The NPDU inside is the same network/application payload,
+  which is why both legs share one data plane.
 - A client broadcast is forwarded to **that listener's device** as unicast. Each
   listener has exactly one device, so a broadcast is a discovery request aimed
   at it; it is never routed to another co-hosted device.
@@ -306,12 +309,13 @@ Done in v1:
   identity, opt-in `access.sc_allow`, per-VMAC rate bucket, and the shared
   pending/replay/COV/write-policy path. Config (`sc:` block and flags),
   `sc_allow` reload, and an opt-in VMAC list.
-- IPv6 front leg (B10, first stage): BACnet/IPv6 link type `0x82` with
-  3-octet virtual addresses, original unicast/broadcast, and the two
-  address-resolution exchanges. Selected by using an IPv6 literal in
-  `listen_addr`; the proxy derives its own virtual address from the bound
-  listener. The data plane, ACL, rate limit, COV and write policy are shared
-  with the IPv4 leg, and the device leg stays IPv4.
+- IPv6 legs (B10): BACnet/IPv6 link type `0x82` with 3-octet virtual
+  addresses, original unicast/broadcast, and the two address-resolution
+  exchanges on either leg. Selected by using an IPv6 literal in `listen_addr`
+  and/or `device_addr`; the proxy derives its own virtual addresses from the
+  bound sockets and discovers the device's. The data plane, ACL, rate limit,
+  COV and write policy are shared with the IPv4 leg, and all four v4/v6 leg
+  combinations are supported.
 - SC data-plane tests: two clients with the same invoke ID, an IP and an SC
   client sharing an invoke ID, per-VMAC ACL and rate, per-leg rate isolation,
   write denial with the tagged Error PDU, replay across the leg boundary, COV
@@ -352,12 +356,9 @@ Known boundaries:
   enforce it.
 - No SC hub role and no SC direct (node-to-node) connections; the proxy is
   always a WebSocket client of a hub.
-- No BACnet/IPv6 on the **device** leg yet. The front leg accepts IPv6
-  clients; the clear device leg is still plain IPv4, and `device_addr` is
-  rejected if it is not IPv4. No independent IPv6 peer is available to drive
-  the front leg yet (bacpypes3's application layer raises
-  `NotImplementedError` for IPv6), so the IPv6 path is pinned by wire-level Go
-  tests and a fuzz target.
+- No independent IPv6 application peer is available to drive either leg yet
+  (bacpypes3's application layer raises `NotImplementedError` for IPv6), so the
+  IPv6 paths are pinned by wire-level Go tests and a fuzz target.
 - No BBMD/router and no traffic between co-hosted devices; each entry is an
   isolated listener↔device pair. `Forwarded-NPDU` and foreign-device frames
   are rejected: accepting them would replace a verified source address with an

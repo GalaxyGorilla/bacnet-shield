@@ -52,11 +52,13 @@ type Config struct {
 	// for this listener; the device leg remains IPv4.
 	ListenAddr string
 	// DeviceAddr is the one legacy device on the clear leg. It must be a
-	// unicast IPv4 address: the proxy accepts device-leg datagrams only from
-	// this host.
+	// unicast address; IPv4 is the usual case, and an IPv6 literal selects
+	// the BACnet/IPv6 device leg. The proxy accepts device-leg datagrams only
+	// from this host.
 	DeviceAddr string
 	// DeviceLocalAddr optionally pins the source address of the device leg.
-	// Empty means an ephemeral port, which is what a BACnet client uses.
+	// Empty means an ephemeral port, which is what a BACnet client uses. It
+	// must use the same address family as DeviceAddr.
 	DeviceLocalAddr string
 	// RequestTimeout bounds how long a forwarded request stays pending.
 	RequestTimeout time.Duration
@@ -110,6 +112,10 @@ const (
 	// seconds covers a slow LAN round trip; the rest of the request timeout
 	// is the client's problem, not shutdown's.
 	drainGrace = 2 * time.Second
+	// deviceVMACRetry is how often an IPv6 device leg re-asks for the
+	// device's virtual address while it is unknown. The answer is usually
+	// immediate; the retry covers a device that was still booting.
+	deviceVMACRetry = 2 * time.Second
 )
 
 // Gateway is one running proxy instance.
@@ -127,7 +133,14 @@ type Gateway struct {
 	deviceConn *net.UDPConn
 	deviceAddr *net.UDPAddr
 	deviceIP   net.IP
-	scLeg      SCLeg
+	deviceIPv6 bool
+	// deviceLocalVMAC is this proxy's virtual address on an IPv6 device leg;
+	// deviceVMAC is the device's, learned through address resolution (or any
+	// frame it sends). A nil deviceVMAC means "not resolved yet".
+	deviceLocalVMAC   bacnet.VMAC
+	deviceVMAC        atomic.Pointer[bacnet.VMAC]
+	deviceVMACAttempt atomic.Int64
+	scLeg             SCLeg
 
 	mu         sync.Mutex
 	pending    map[byte]*pendingReq     // device invoke ID -> client request
@@ -167,14 +180,12 @@ func New(cfg Config, pol *access.Policy, log *zap.Logger, m *observ.Metrics) (*G
 	if cfg.MaxPending <= 0 || cfg.MaxPending > 256 {
 		return nil, fmt.Errorf("proxy: max_pending %d outside 1..256", cfg.MaxPending)
 	}
-	deviceAddr, err := net.ResolveUDPAddr("udp4", cfg.DeviceAddr)
+	deviceAddr, deviceNetwork, err := resolveAddr(cfg.DeviceAddr)
 	if err != nil {
 		return nil, fmt.Errorf("proxy: device address %q: %w", cfg.DeviceAddr, err)
 	}
-	if deviceAddr.IP == nil || deviceAddr.IP.To4() == nil {
-		return nil, fmt.Errorf("proxy: device address %q is not IPv4 (the device leg is IPv4-only)", cfg.DeviceAddr)
-	}
-	listenAddr, network, err := resolveListen(cfg.ListenAddr)
+	deviceIPv6 := deviceNetwork == "udp6"
+	listenAddr, network, err := resolveAddr(cfg.ListenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("proxy: listen address %q: %w", cfg.ListenAddr, err)
 	}
@@ -189,40 +200,57 @@ func New(cfg Config, pol *access.Policy, log *zap.Logger, m *observ.Metrics) (*G
 	}
 	var local *net.UDPAddr
 	if cfg.DeviceLocalAddr != "" {
-		local, err = net.ResolveUDPAddr("udp4", cfg.DeviceLocalAddr)
+		var localNetwork string
+		local, localNetwork, err = resolveAddr(cfg.DeviceLocalAddr)
 		if err != nil {
 			_ = clientConn.Close()
 			return nil, fmt.Errorf("proxy: device local address %q: %w", cfg.DeviceLocalAddr, err)
 		}
+		if localNetwork != deviceNetwork {
+			_ = clientConn.Close()
+			return nil, fmt.Errorf("proxy: device local address %q is %s but device address %q is %s",
+				cfg.DeviceLocalAddr, localNetwork, cfg.DeviceAddr, deviceNetwork)
+		}
 	}
-	deviceConn, err := net.ListenUDP("udp4", local)
+	deviceConn, err := net.ListenUDP(deviceNetwork, local)
 	if err != nil {
 		_ = clientConn.Close()
 		return nil, fmt.Errorf("proxy: bind device leg: %w", err)
 	}
+	var deviceLocalVMAC bacnet.VMAC
+	if deviceIPv6 {
+		deviceLocalVMAC = deriveVMAC(deviceConn.LocalAddr().(*net.UDPAddr))
+	}
 	g := &Gateway{
-		cfg:          cfg,
-		name:         cfg.DeviceName,
-		log:          log,
-		metrics:      m,
-		audit:        cfg.Audit,
-		clientConn:   clientConn,
-		clientIPv6:   clientIPv6,
-		clientVMAC:   clientVMAC,
-		deviceConn:   deviceConn,
-		deviceAddr:   deviceAddr,
-		deviceIP:     deviceAddr.IP.To4(),
-		pending:      make(map[byte]*pendingReq),
-		byClient:     make(map[clientKey]byte),
-		done:         make(map[clientKey]*completed),
-		segWrites:    make(map[clientKey]*segWrite),
-		fromDevice:   make(map[byte]*deviceExchange),
-		toDevice:     make(map[clientKey]byte),
-		clients:      make(map[string]*clientState),
-		cov:          make(map[bacnet.ObjectID]map[covSubKey]*subscription),
-		drainTimeout: drainGrace,
+		cfg:             cfg,
+		name:            cfg.DeviceName,
+		log:             log,
+		metrics:         m,
+		audit:           cfg.Audit,
+		clientConn:      clientConn,
+		clientIPv6:      clientIPv6,
+		clientVMAC:      clientVMAC,
+		deviceConn:      deviceConn,
+		deviceAddr:      deviceAddr,
+		deviceIP:        deviceAddr.IP,
+		deviceIPv6:      deviceIPv6,
+		deviceLocalVMAC: deviceLocalVMAC,
+		pending:         make(map[byte]*pendingReq),
+		byClient:        make(map[clientKey]byte),
+		done:            make(map[clientKey]*completed),
+		segWrites:       make(map[clientKey]*segWrite),
+		fromDevice:      make(map[byte]*deviceExchange),
+		toDevice:        make(map[clientKey]byte),
+		clients:         make(map[string]*clientState),
+		cov:             make(map[bacnet.ObjectID]map[covSubKey]*subscription),
+		drainTimeout:    drainGrace,
 	}
 	g.policy.Store(pol)
+	// Ask for the device's virtual address before Serve starts reading, so the
+	// answer is the first thing the device loop sees. A device that is slow or
+	// offline is retried by resolveLoop; requests are not forwarded until the
+	// address is known.
+	g.ensureDeviceVMAC()
 	return g, nil
 }
 
@@ -248,10 +276,11 @@ func (g *Gateway) SetPolicy(p *access.Policy) { g.policy.Store(p) }
 // requests and closes the sockets. A bind error is reported by New, so Serve
 // only returns after shutdown.
 func (g *Gateway) Serve(ctx context.Context) error {
-	g.wg.Add(3)
+	g.wg.Add(4)
 	safego.Go(g.log, "gateway client loop", func() { defer g.wg.Done(); g.clientLoop(ctx) })
 	safego.Go(g.log, "gateway device loop", func() { defer g.wg.Done(); g.deviceLoop(ctx) })
 	safego.Go(g.log, "gateway sweeper", func() { defer g.wg.Done(); g.sweepLoop(ctx) })
+	safego.Go(g.log, "gateway vmac resolution", func() { defer g.wg.Done(); g.resolveLoop(ctx) })
 
 	<-ctx.Done()
 	g.drain()
@@ -419,12 +448,92 @@ func buildNPDU(n bacnet.NPDU, apdu []byte) []byte {
 	return n.Marshal()
 }
 
-// buildFrame wraps an NPDU as a plain Original-Unicast BACnet/IP frame for the
-// clear device leg. The gateway always speaks unicast to its device, even when a
-// client sent a broadcast: this gateway has exactly one device, so a broadcast
-// is a discovery request aimed at that device.
-func buildFrame(n bacnet.NPDU, apdu []byte) []byte {
-	return bacnet.BVLC{Function: bacnet.BVLCOriginalUnicastNPDU, Data: buildNPDU(n, apdu)}.Marshal()
+// buildDeviceFrame wraps an NPDU as a frame for the clear device leg. The
+// gateway always speaks unicast to its device, even when a client sent a
+// broadcast: this gateway has exactly one device, so a broadcast is a discovery
+// request aimed at that device.
+//
+// The family is the device leg's, not the client leg's: an IPv4 client in front
+// of an IPv6 device is a supported shape. On an IPv6 leg the frame needs the
+// device's virtual address; until address resolution answers, ok is false and
+// the caller must drop the request (the client retransmits, and resolveLoop
+// keeps trying).
+func (g *Gateway) buildDeviceFrame(n bacnet.NPDU, apdu []byte) (frame []byte, ok bool) {
+	npdu := buildNPDU(n, apdu)
+	if !g.deviceIPv6 {
+		return bacnet.BVLC{Function: bacnet.BVLCOriginalUnicastNPDU, Data: npdu}.Marshal(), true
+	}
+	dst := g.deviceVMAC.Load()
+	if dst == nil {
+		g.ensureDeviceVMAC()
+		return nil, false
+	}
+	return bacnet.BVLC6{
+		Function: bacnet.BVLC6OriginalUnicastNPDU,
+		Src:      g.deviceLocalVMAC,
+		Dst:      *dst,
+		Data:     npdu,
+	}.Marshal(), true
+}
+
+// ensureDeviceVMAC asks an IPv6 device for its virtual address. The frame is
+// only written; the answer is consumed by deviceLoop, so there is exactly one
+// reader on the device socket. Attempts are rate-limited; the answer can also
+// arrive as the source address of any frame the device sends.
+func (g *Gateway) ensureDeviceVMAC() {
+	if !g.deviceIPv6 || g.deviceVMAC.Load() != nil {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := g.deviceVMACAttempt.Load()
+	if now-last < int64(deviceVMACRetry) {
+		return
+	}
+	if !g.deviceVMACAttempt.CompareAndSwap(last, now) {
+		return
+	}
+	frame := bacnet.BVLC6{
+		Function: bacnet.BVLC6VirtualAddressResolution,
+		Src:      g.deviceLocalVMAC,
+	}.Marshal()
+	if _, err := g.deviceConn.WriteToUDP(frame, g.deviceAddr); err != nil {
+		g.log.Debug("device vmac resolution write", zap.Error(err), zap.Stringer("device", g.deviceAddr))
+	}
+}
+
+// setDeviceVMAC records the device's virtual address, learned from a
+// resolution answer or from the source address of any frame the device sent.
+func (g *Gateway) setDeviceVMAC(v bacnet.VMAC) {
+	if v.IsZero() {
+		return
+	}
+	if g.deviceVMAC.Load() == nil {
+		g.log.Info("device virtual address resolved",
+			zap.String("device_vmac", v.String()), zap.Stringer("device", g.deviceAddr))
+	}
+	cp := v
+	g.deviceVMAC.Store(&cp)
+}
+
+// resolveLoop retries address resolution while the device's virtual address is
+// unknown. It never reads the device socket; deviceLoop owns that.
+func (g *Gateway) resolveLoop(ctx context.Context) {
+	if !g.deviceIPv6 {
+		return
+	}
+	t := time.NewTicker(deviceVMACRetry)
+	defer t.Stop()
+	for {
+		if g.deviceVMAC.Load() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			g.ensureDeviceVMAC()
+		}
+	}
 }
 
 // touchClient records a client for unsolicited notification delivery. It is

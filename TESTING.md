@@ -11,7 +11,7 @@ local `make` target.
 | Policy | Allow-list, per-client rate limit, optional shared per-device budget, read-only, scoped write rules, deny-overrides, allow-must-cover, service-level writes; SC VMAC allow-list and per-VMAC bucket |
 | Audit | JSON-lines writer with time-stamping and omitted empty fields; rotation cap and one-backup bound; drop-and-count under a blocked sink; served end-to-end for a refused write (with decoded target and reason), an ACL denial on each leg, and an unsupported subscription; `ServiceName` for both service-number spaces |
 | Data plane | Real loopback UDP sockets, invoke-ID collision and reuse, retransmission dedupe, pending cap/expiry, routing strip, device source validation, forward-latency histogram, request-timeout counting |
-| IPv6 front leg | Real `[::1]` sockets: VirtualAddressResolution discovers the proxy's 3-octet virtual address, a unicast read round-trips, a broadcast Who-Is reaches the IPv4 device and the I-Am returns to the client's virtual address, address resolution only answers for this proxy, an off-list IPv6 source gets no link-layer answer, a write is refused with the tagged Error PDU, a malformed frame costs one datagram, and a Forwarded-NPDU is counted unsupported |
+| IPv6 | Real `[::1]` sockets on both legs: VirtualAddressResolution discovers the proxy's and the device's 3-octet virtual addresses, an IPv6 client read round-trips to an IPv6 device, an IPv4 client reaches an IPv6 device, a broadcast Who-Is crosses a mixed-family pair, address resolution only answers for this proxy, an off-list IPv6 client gets no link-layer answer, a write is refused with the tagged Error PDU, a malformed frame costs one datagram, a Forwarded-NPDU is counted unsupported, and an unresolved device drops the request instead of sending to a guessed address |
 | Co-hosting | Two listener↔device pairs in one process: each listener reaches its own device (Who-Is/I-Am), a read-only policy on one device does not gate the other, both `device` labels appear on one shared scrape, and a bind conflict fails startup |
 | SC transport | Real in-process TLS 1.3 hub: connect handshake, heartbeat and heartbeat *timeout* (a hub that stops ACKing is dropped), reconnect and failover across a hub list, hostname verification, destination/origin filtering, attach/detach state reporting, and survival of a malformed frame and a non-binary WebSocket message |
 | SC data plane | In-memory SC leg: two clients with the same invoke ID, an IP and an SC client sharing an invoke ID, per-VMAC ACL/rate, per-leg rate isolation, write denial shape, segmented-write reassembly over the SC leg, COV routing, I-Am fan-out, replay served across the leg boundary, shared pending |
@@ -161,9 +161,9 @@ bacpypes3 0.0.110 and bacnet-stack 1.6.1 both mark the service as TODO, so no
 independent peer can drive it yet. The encoding the tests use was checked
 against bacpypes3's `COVMultipleSubscriptionList` / `PropertyValue` encoders.
 
-The IPv6 front leg has no independent application peer either: bacpypes3
+The IPv6 legs have no independent application peer either: bacpypes3
 0.0.110 ships the Annex U link layer, but its `Application` raises
-`NotImplementedError("IPv6")`. The IPv6 path is therefore pinned by the Go
+`NotImplementedError("IPv6")`. Both IPv6 legs are therefore pinned by the Go
 wire tests and `FuzzParseBVLC6`; the IPv4 interop remains the third-party check
 for the shared data plane, policy and write path.
 

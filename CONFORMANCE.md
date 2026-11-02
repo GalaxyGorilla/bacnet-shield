@@ -211,11 +211,11 @@ the log line is the whole response.
   [BACKLOG.md](BACKLOG.md).
 - **No BBMD or foreign-device registration.** These are outside the scope; see
   [BACKLOG.md](BACKLOG.md).
-- **The IPv6 front leg has no independent application peer.** bacpypes3's
-  Annex U link layer exists, but its `Application` raises
-  `NotImplementedError("IPv6")`, so the IPv6 path is covered by Go wire tests
-  and a fuzz target rather than by a third-party client. The device leg stays
-  IPv4.
+- **The IPv6 legs have no independent application peer.** bacpypes3's Annex U
+  link layer exists, but its `Application` raises `NotImplementedError("IPv6")`,
+  so both the front and device IPv6 paths are covered by Go wire tests and a
+  fuzz target rather than by a third-party client or device. IPv4 interop
+  remains the peer check for the shared data plane and policy.
 - **No formal conformance suite.** This suite is the anchor; it proves the
   documented behavior against one independent implementation, not certification.
 

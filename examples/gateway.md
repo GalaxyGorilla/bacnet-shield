@@ -72,7 +72,8 @@ bacnet-shield gateway \
   standard BACnet/IP UDP port. If the proxy and the device share a host, use a
   different client port here (for example `:47809`).
 - `--device` — the one legacy device (plain BACnet/IP, unmodified). It must be
-  a unicast IPv4 address.
+  a unicast address; IPv4 is the usual case, and an IPv6 literal selects the
+  BACnet/IPv6 device leg.
 - `--read-only` — every write is refused with a BACnet Error PDU
   (class `security`, code `write-access-denied`) that comes from the proxy; the
   device never sees the write.

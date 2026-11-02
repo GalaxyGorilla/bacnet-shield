@@ -257,14 +257,31 @@ func TestDecodeUnknownKeyFails(t *testing.T) {
 }
 
 func TestValidateIPv6FrontLeg(t *testing.T) {
-	// The front leg may be IPv6 while the device leg stays IPv4; that is the
-	// retrofit shape this feature targets.
+	// The front leg may be IPv6 while the device leg stays IPv4; that is one
+	// supported mixed shape.
 	c, err := decode(t, oneDevice("listen_addr: \"[::1]:47808\"\ndevice_addr: 192.0.2.10:47808\n"))
 	if err != nil {
 		t.Fatalf("IPv6 front leg rejected: %v", err)
 	}
 	if got := c.Devices[0].ListenAddr; got != "[::1]:47808" {
 		t.Fatalf("listen_addr = %q", got)
+	}
+}
+
+func TestValidateIPv6DeviceLeg(t *testing.T) {
+	// The other mixed shape: an IPv4 (or IPv6) front leg in front of an IPv6
+	// device.
+	for _, entry := range []string{
+		"listen_addr: 192.0.2.10:47808\ndevice_addr: \"[::1]:47808\"\n",
+		"listen_addr: \"[::1]:47808\"\ndevice_addr: \"[::1]:47809\"\n",
+	} {
+		c, err := decode(t, oneDevice(entry))
+		if err != nil {
+			t.Fatalf("%q rejected: %v", entry, err)
+		}
+		if got := c.Devices[0].DeviceAddr; got != "[::1]:47808" && got != "[::1]:47809" {
+			t.Fatalf("device_addr = %q", got)
+		}
 	}
 }
 
@@ -280,8 +297,8 @@ func TestValidateRejections(t *testing.T) {
 		{"bad listen", oneDevice("device_addr: 192.0.2.10:47808\nlisten_addr: nope\n")},
 		{"same legs", oneDevice("device_addr: :47808\nlisten_addr: :47808\n")},
 		{"bad device port", oneDevice("device_addr: 192.0.2.10:99999\n")},
-		{"ipv6 device addr", oneDevice("device_addr: \"[::1]:47808\"\n")},
-		{"ipv6 device local", oneDevice("device_addr: 192.0.2.10:47808\ndevice_local_addr: \"[::1]:47808\"\n")},
+		{"mixed device families", oneDevice("device_addr: \"[::1]:47808\"\ndevice_local_addr: 192.0.2.1:47808\n")},
+		{"mixed device families reverse", oneDevice("device_addr: 192.0.2.10:47808\ndevice_local_addr: \"[::1]:47808\"\n")},
 		{"instance too large", oneDevice("device_addr: 192.0.2.10:47808\ndevice_instance: 4194304\n")},
 		{"timeout zero", oneDevice("device_addr: 192.0.2.10:47808\nrequest_timeout_secs: -1\n")},
 		{"timeout huge", oneDevice("device_addr: 192.0.2.10:47808\nrequest_timeout_secs: 601\n")},

@@ -20,21 +20,49 @@ func (g *Gateway) handleDevice(dg []byte, src *net.UDPAddr) {
 		return
 	}
 
-	b, err := bacnet.ParseBVLC(dg)
-	if err != nil {
-		g.metrics.ParseErrors.Inc()
-		g.log.Debug("device bvlc parse", zap.Error(err), zap.Stringer("device", src))
-		return
+	var data []byte
+	if g.deviceIPv6 {
+		b, err := bacnet.ParseBVLC6(dg)
+		if err != nil {
+			g.metrics.ParseErrors.Inc()
+			g.log.Debug("device bvlc6 parse", zap.Error(err), zap.Stringer("device", src))
+			return
+		}
+		switch b.Function {
+		case bacnet.BVLC6VirtualAddressResolutionACK:
+			// The answer to our own resolution request. Its source virtual
+			// address is the device's; the UDP source is already checked
+			// above.
+			g.setDeviceVMAC(b.Src)
+			return
+		case bacnet.BVLC6OriginalUnicastNPDU, bacnet.BVLC6OriginalBroadcastNPDU:
+			// Any frame the device sends also reveals its virtual address.
+			g.setDeviceVMAC(b.Src)
+			data = b.Data
+		default:
+			g.metrics.Unsupported.Inc()
+			g.log.Debug("device sent an unsupported IPv6 bvlc function",
+				zap.String("function", b.Function.String()), zap.Stringer("device", src))
+			return
+		}
+	} else {
+		b, err := bacnet.ParseBVLC(dg)
+		if err != nil {
+			g.metrics.ParseErrors.Inc()
+			g.log.Debug("device bvlc parse", zap.Error(err), zap.Stringer("device", src))
+			return
+		}
+		switch b.Function {
+		case bacnet.BVLCOriginalUnicastNPDU, bacnet.BVLCOriginalBroadcastNPDU:
+		default:
+			g.metrics.Unsupported.Inc()
+			g.log.Debug("device sent an unsupported bvlc function",
+				zap.String("function", b.Function.String()), zap.Stringer("device", src))
+			return
+		}
+		data = b.Data
 	}
-	switch b.Function {
-	case bacnet.BVLCOriginalUnicastNPDU, bacnet.BVLCOriginalBroadcastNPDU:
-	default:
-		g.metrics.Unsupported.Inc()
-		g.log.Debug("device sent an unsupported bvlc function",
-			zap.String("function", b.Function.String()), zap.Stringer("device", src))
-		return
-	}
-	n, err := bacnet.ParseNPDU(b.Data)
+	n, err := bacnet.ParseNPDU(data)
 	if err != nil {
 		g.metrics.ParseErrors.Inc()
 		g.log.Debug("device npdu parse", zap.Error(err), zap.Stringer("device", src))
@@ -378,7 +406,12 @@ func (g *Gateway) answerUnroutable(a bacnet.APDU, src *net.UDPAddr) {
 	default:
 		out = bacnet.ErrorAPDU(a.InvokeID, a.Service, bacnet.ErrorClassServices, bacnet.ErrorCodeServiceRequestDenied)
 	}
-	g.sendDeviceTo(buildFrame(bacnet.NPDU{}, out.Marshal()), src)
+	frame, ok := g.buildDeviceFrame(bacnet.NPDU{}, out.Marshal())
+	if !ok {
+		g.log.Debug("device virtual address not resolved; cannot answer an unroutable request")
+		return
+	}
+	g.sendDeviceTo(frame, src)
 }
 
 // dropExchangeLocked removes a device-initiated exchange and every reverse

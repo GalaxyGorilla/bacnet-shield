@@ -226,7 +226,13 @@ func (g *Gateway) forwardConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, now tim
 					g.log.Debug("client segment patch", zap.Error(err), zap.Stringer("client", p))
 					return
 				}
-				frame := buildFrame(n, apdu)
+				frame, ok := g.buildDeviceFrame(n, apdu)
+				if !ok {
+					g.mu.Unlock()
+					g.log.Debug("device virtual address not resolved; dropping segment",
+						zap.Stringer("client", p), zap.Uint8("invoke_id", a.InvokeID))
+					return
+				}
 				pending.fwd = frame
 				pending.deadline = now.Add(g.cfg.RequestTimeout)
 				g.mu.Unlock()
@@ -287,7 +293,14 @@ func (g *Gateway) forwardConfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, now tim
 		g.log.Debug("client request patch", zap.Error(err), zap.Stringer("client", p))
 		return
 	}
-	frame := buildFrame(n, apdu)
+	frame, ok := g.buildDeviceFrame(n, apdu)
+	if !ok {
+		g.freeDevID(devID)
+		g.mu.Unlock()
+		g.log.Debug("device virtual address not resolved; dropping request",
+			zap.Stringer("client", p), zap.Uint8("invoke_id", a.InvokeID))
+		return
+	}
 	g.pending[devID] = &pendingReq{
 		client:    p,
 		clientID:  a.InvokeID,
@@ -329,7 +342,12 @@ func (g *Gateway) handleClientUnconfirmed(a bacnet.APDU, n bacnet.NPDU, p peer, 
 			zap.String("reason", reason))
 		return
 	}
-	frame := buildFrame(n, n.APDU)
+	frame, ok := g.buildDeviceFrame(n, n.APDU)
+	if !ok {
+		g.log.Debug("device virtual address not resolved; dropping unconfirmed request",
+			zap.Stringer("client", p), zap.String("service", a.ServiceName()))
+		return
+	}
 	g.metrics.Forwarded.Inc()
 	g.sendDevice(frame)
 }
@@ -359,7 +377,13 @@ func (g *Gateway) handleClientResponse(a bacnet.APDU, n bacnet.NPDU, p peer, now
 			g.log.Debug("client answer patch", zap.Error(err), zap.Stringer("client", p))
 			return
 		}
-		frame := buildFrame(n, apdu)
+		frame, ok := g.buildDeviceFrame(n, apdu)
+		if !ok {
+			g.mu.Unlock()
+			g.log.Debug("device virtual address not resolved; dropping client answer",
+				zap.Stringer("client", p), zap.Uint8("invoke_id", a.InvokeID))
+			return
+		}
 		devAddr := ex.devAddr
 		if a.Type == bacnet.PDUSegmentACK {
 			ex.deadline = now.Add(g.cfg.RequestTimeout)
@@ -383,7 +407,13 @@ func (g *Gateway) handleClientResponse(a bacnet.APDU, n bacnet.NPDU, p peer, now
 			g.log.Debug("client segment-ack patch", zap.Error(err), zap.Stringer("client", p))
 			return
 		}
-		frame := buildFrame(n, apdu)
+		frame, ok := g.buildDeviceFrame(n, apdu)
+		if !ok {
+			g.mu.Unlock()
+			g.log.Debug("device virtual address not resolved; dropping segment ack",
+				zap.Stringer("client", p), zap.Uint8("invoke_id", a.InvokeID))
+			return
+		}
 		pending.deadline = now.Add(g.cfg.RequestTimeout)
 		devAddr := pending.devAddr
 		g.mu.Unlock()

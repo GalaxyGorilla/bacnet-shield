@@ -41,7 +41,11 @@ devices:
     # The device leg stays plain IPv4; a mixed listener is the retrofit shape.
     listen_addr: ":47808"
 
-    # The one legacy device on the clear leg. It must be a unicast IPv4 address.
+    # The one legacy device on the clear leg. It must be a unicast address;
+    # IPv4 is the usual case. An IPv6 literal (for example
+    # "[2001:db8::42]:47808") selects the BACnet/IPv6 device leg. The two legs
+    # are independent, so an IPv6 listener in front of an IPv4 device (or the
+    # reverse) is supported.
     device_addr: "10.0.0.42:47808"
 
     # Optional source address of the device leg. Empty = ephemeral port, which

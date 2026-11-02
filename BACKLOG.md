@@ -102,7 +102,8 @@ Remaining:
   accepts VMAC entries only and rejects a UUID entry rather than pretending to
   enforce it. A future direct-connection mode could add UUID admission.
 
-The clear device leg stays plain BACnet/IP.
+The clear device leg is its own BACnet/IP (IPv4 or IPv6) link, independent of
+the front leg.
 
 ### B2 — Multi-device instance
 
@@ -183,19 +184,19 @@ closed-set reason. See [README.md](README.md#audit-trail),
 
 ### B10 — BACnet/IPv6
 
-DONE for the front leg. An IPv6 literal in `listen_addr` selects the
-BACnet/IPv6 link layer (type `0x82`): original unicast/broadcast, the two
-address-resolution exchanges, a derived 3-octet virtual address, and the same
-ACL, rate limit, COV and write policy as the IPv4 leg. The device leg stays
-plain IPv4, which is the common retrofit shape (IPv6 client network, legacy
-IPv4 controller). `device_addr` is rejected if it is not IPv4.
+DONE. Either leg may be BACnet/IPv6 (Annex U, link type `0x82`): original
+unicast/broadcast, the two address-resolution exchanges, derived 3-octet
+virtual addresses, and the same ACL, rate limit, COV and write policy as IPv4.
+All four v4/v6 leg combinations work, including the common retrofit shapes
+(IPv6 clients in front of an IPv4 controller, or an IPv4 front leg in front of
+an IPv6 device). On an IPv6 device leg the proxy discovers the device's virtual
+address with `VirtualAddressResolution` (and learns it from any frame the device
+sends); a request is dropped while the address is unknown rather than sent to a
+guess. `device_local_addr` must match the device's family.
 
-Open: an **IPv6 device leg**. That needs the same link-layer work on the clear
-side plus a decided mixed-family policy (an IPv6 listener in front of an IPv4
-device already works because the data plane holds NPDUs). No independent IPv6
-application peer exists yet (bacpypes3's `Application` raises
-`NotImplementedError("IPv6")`), so the front leg is pinned by Go wire tests and
-`FuzzParseBVLC6`.
+Open only for validation: no independent IPv6 application peer exists
+(bacpypes3's `Application` raises `NotImplementedError("IPv6")`), so both legs
+are pinned by Go wire tests and `FuzzParseBVLC6`.
 
 ## Open — appliance management integration
 

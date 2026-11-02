@@ -11,11 +11,11 @@ import (
 	"github.com/GalaxyGorilla/bacnet-shield/internal/bacnet"
 )
 
-// resolveListen chooses the socket family from the configured listen address.
-// An empty host (":47808") keeps the historical IPv4 wildcard; an IPv6 literal
+// resolveAddr chooses the socket family from a configured address. An empty
+// host (":47808") keeps the historical IPv4 wildcard; an IPv6 literal
 // ("[::1]:47808" or "[::]:47808") selects IPv6. A hostname is resolved as IPv4
-// for compatibility; use a literal when the IPv6 leg is intended.
-func resolveListen(addr string) (*net.UDPAddr, string, error) {
+// for compatibility; use a literal when an IPv6 leg is intended.
+func resolveAddr(addr string) (*net.UDPAddr, string, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, "", err

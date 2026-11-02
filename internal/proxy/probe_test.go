@@ -114,9 +114,45 @@ func TestProbeDeviceTimesOut(t *testing.T) {
 	dev.expectNothing(t, 150*time.Millisecond)
 }
 
+func TestProbeDeviceIPv6ReadProperty(t *testing.T) {
+	dev := newFakeDevice6(t)
+	instance := uint32(1001)
+
+	type outcome struct {
+		res ProbeResult
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := ProbeDevice(context.Background(), dev.addr().String(), &instance)
+		done <- outcome{res, err}
+	}()
+
+	// mustRecv answers the probe's VirtualAddressResolution on the way, then
+	// returns the ReadProperty.
+	req, src, proxyVMAC := dev.mustRecv(t, 3*time.Second)
+	if req.Type != bacnet.PDUConfirmedRequest || req.Service != bacnet.ServiceReadProperty {
+		t.Fatalf("probe request = %+v", req)
+	}
+	oid := bacnet.ObjectID{Type: bacnet.ObjectDevice, Instance: instance}
+	dev.send(t, readPropertyACK(req.InvokeID, oid, bacnet.PropertyObjectName,
+		[]byte{0x75, 0x04, 't', 'e', 's', 't'}), src, proxyVMAC)
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("ProbeDevice: %v", got.err)
+	}
+	if got.res.Device != oid {
+		t.Fatalf("device = %v, want %v", got.res.Device, oid)
+	}
+	if !strings.Contains(got.res.Detail, "ReadProperty(device,1001,object-name) ok") {
+		t.Fatalf("detail = %q", got.res.Detail)
+	}
+}
+
 func TestProbeDeviceBadAddress(t *testing.T) {
 	instance := uint32(1)
-	for _, addr := range []string{"not-an-address", "[::1]:47808", "127.0.0.1"} {
+	for _, addr := range []string{"not-an-address", "127.0.0.1", ":47808"} {
 		if _, err := ProbeDevice(context.Background(), addr, &instance); err == nil {
 			t.Errorf("ProbeDevice(%q) succeeded", addr)
 		}

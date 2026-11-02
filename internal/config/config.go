@@ -260,15 +260,23 @@ func (d *Device) validate(i int, seenNames map[string]bool, seenListen map[strin
 	if err := validateHostPort("device_addr", d.DeviceAddr); err != nil {
 		return fail("%s", err)
 	}
-	if err := validateIPv4("device_addr", d.DeviceAddr); err != nil {
-		return fail("%s", err)
-	}
 	if d.DeviceLocalAddr != "" {
 		if err := validateHostPort("device_local_addr", d.DeviceLocalAddr); err != nil {
 			return fail("%s", err)
 		}
-		if err := validateIPv4("device_local_addr", d.DeviceLocalAddr); err != nil {
+	}
+	dev6, err := addrIsIPv6(d.DeviceAddr)
+	if err != nil {
+		return fail("%s", err)
+	}
+	if d.DeviceLocalAddr != "" {
+		local6, err := addrIsIPv6(d.DeviceLocalAddr)
+		if err != nil {
 			return fail("%s", err)
+		}
+		if local6 != dev6 {
+			return fail("device_local_addr %q and device_addr %q must use the same address family",
+				d.DeviceLocalAddr, d.DeviceAddr)
 		}
 	}
 	if d.ListenAddr == d.DeviceAddr {
@@ -406,21 +414,22 @@ func (d *Device) DeviceObjectID() (bacnet.ObjectID, bool) {
 	return bacnet.ObjectID{Type: bacnet.ObjectDevice, Instance: *d.DeviceInstance}, true
 }
 
-// validateIPv4 rejects an IPv6 literal for a leg that is IPv4-only. The
-// listen address may be IPv6 (the front leg supports BACnet/IPv6), but the
-// clear device leg is still plain BACnet/IPv4.
-func validateIPv4(field, addr string) error {
+// addrIsIPv6 reports whether a host:port literal names an IPv6 address. An
+// empty host (wildcard) and a hostname are treated as IPv4, matching
+// resolveAddr's default; the daemon resolves them the same way.
+func addrIsIPv6(addr string) (bool, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("%s %q: %w", field, addr, err)
+		return false, fmt.Errorf("%q: %w", addr, err)
 	}
 	if host == "" {
-		return nil
+		return false, nil
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
-		return fmt.Errorf("%s %q is IPv6; the device leg is IPv4-only", field, addr)
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false, nil
 	}
-	return nil
+	return ip.To4() == nil, nil
 }
 
 // validateHostPort checks a UDP or HTTP listener address. Both are a host

@@ -172,19 +172,23 @@ devices:
 ```
 
 Planned work and explicit non-goals are recorded in [BACKLOG.md](BACKLOG.md):
-a BBMD/router role, an IPv6 device leg and physical commissioning remain out
-of the current scope; UUID-keyed SC admission is not enforceable through a hub
-and is documented there.
+a BBMD/router role and physical commissioning remain out of the current scope;
+UUID-keyed SC admission is not enforceable through a hub and is documented
+there.
 
-### IPv6 front leg
+### IPv6
 
-The client-facing listener may speak BACnet/IPv6 (Annex U): use an IPv6
-literal for `listen_addr`, for example `"[::1]:47808"` or `"[::]:47808"`. The
-proxy then accepts the IPv6 link-layer type (`0x82`), answers virtual-address
-resolution, and keeps the same allow-list, rate limit, write policy, COV
-routing and metrics. The **device leg stays plain IPv4** in this release, so the
-usual retrofit shape is an IPv6 client network in front of an old IPv4
-controller.
+Either leg may speak BACnet/IPv6 (Annex U): use an IPv6 literal for
+`listen_addr` and/or `device_addr`, for example `"[::1]:47808"` or
+`"[::]:47808"`. The proxy then uses the IPv6 link-layer type (`0x82`),
+virtual-address resolution, and the same allow-list, rate limit, write policy,
+COV routing and metrics. The two legs are independent, so all four combinations
+work:
+
+- IPv4 clients → IPv4 device (the original shape),
+- IPv6 clients → IPv4 device (modern client network, old controller),
+- IPv4 clients → IPv6 device,
+- IPv6 clients → IPv6 device.
 
 ```yaml
 devices:
@@ -194,13 +198,18 @@ devices:
     access:
       allow: ["2001:db8:10::/48"]  # IPv6 allow-list / rate limits apply
       read_only: true
+
+  - name: ahu
+    listen_addr: "10.8.0.2:47808"     # IPv4 clients
+    device_addr: "[2001:db8:20::42]:47808"
 ```
 
 A client discovers the proxy's 3-octet virtual address with
 `VirtualAddressResolution`; the proxy derives a stable address from its bound
-listener, so no extra configuration is needed. `device_addr` and
-`device_local_addr` must stay IPv4 and are rejected during validation if they
-are not.
+listener. On the device leg the proxy discovers the device's virtual address
+the same way (and learns it from any frame the device sends), so no virtual
+address has to be configured. `device_local_addr`, when set, must use the same
+family as `device_addr`; validation rejects a mismatch.
 
 ## Scope
 
@@ -215,7 +224,7 @@ pairs in one process, not a BACnet device stack and not a router.
 | Confirmed and unconfirmed services, payload opaque | Service translation or object/property remapping |
 | SubscribeCOV, SubscribeCOVProperty and SubscribeCOVPropertyMultiple | Segmented subscriptions (denied fail-closed) |
 | Segmented requests and responses, including authorized segmented writes | Segmented writes larger than the 16 KiB reassembly bound |
-| IPv6 BACnet/IP clients on the front leg | BACnet/IPv6 on the device leg (still IPv4) |
+| BACnet/IPv6 on both legs, including mixed families | BBMD, foreign-device registration and routing between networks |
 
 A client broadcast is forwarded to **that listener's device** as unicast: a
 device's listener has exactly one device, so a broadcast is a discovery request

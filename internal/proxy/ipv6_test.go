@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -115,7 +116,7 @@ func TestResolveListenFamily(t *testing.T) {
 		{"[::]:47808", "udp6"},
 	}
 	for _, tc := range cases {
-		ua, network, err := resolveListen(tc.addr)
+		ua, network, err := resolveAddr(tc.addr)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.addr, err)
 		}
@@ -328,4 +329,212 @@ func TestGatewayIPv6UnsupportedFunction(t *testing.T) {
 		return testutil.ToFloat64(f.metrics.Unsupported)
 	}, 1)
 	dev.expectNothing(t, 250*time.Millisecond)
+}
+
+// fakeDevice6 is the legacy device on an IPv6 clear leg. It answers the
+// proxy's VirtualAddressResolution (a real Annex U node does) and otherwise
+// speaks the same NPDU/APDU wire format as the IPv4 fixture.
+type fakeDevice6 struct {
+	t    *testing.T
+	conn *net.UDPConn
+	vmac bacnet.VMAC
+}
+
+func newFakeDevice6(t *testing.T) *fakeDevice6 {
+	t.Helper()
+	conn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback, Port: 0})
+	if err != nil {
+		t.Fatalf("ipv6 device bind: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return &fakeDevice6{t: t, conn: conn, vmac: bacnet.VMAC{0x0d, 0x00, 0x01}}
+}
+
+func (d *fakeDevice6) addr() *net.UDPAddr { return d.conn.LocalAddr().(*net.UDPAddr) }
+
+// answerResolution performs the Annex U address exchange the proxy starts in
+// New. The test calls it before sending a client request so the proxy knows the
+// device's virtual address when the request arrives; a real device answers it
+// on its own.
+func (d *fakeDevice6) answerResolution(t *testing.T) {
+	t.Helper()
+	_ = d.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 65535)
+	n, src, err := d.conn.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("ipv6 device resolution: %v", err)
+	}
+	b, err := bacnet.ParseBVLC6(buf[:n])
+	if err != nil {
+		t.Fatalf("ipv6 device resolution frame: %v", err)
+	}
+	if b.Function != bacnet.BVLC6VirtualAddressResolution {
+		t.Fatalf("ipv6 device got %s, want virtual-address-resolution", b.Function)
+	}
+	ack := bacnet.BVLC6{Function: bacnet.BVLC6VirtualAddressResolutionACK,
+		Src: d.vmac, Dst: b.Src}.Marshal()
+	if _, err := d.conn.WriteToUDP(ack, src); err != nil {
+		t.Fatalf("ipv6 device resolution ack: %v", err)
+	}
+}
+
+// recv reads the next NPDU-bearing frame, answering address resolution on the
+// way. It returns the APDU, the proxy's UDP address and the proxy's virtual
+// address (which a response must use as the destination).
+func (d *fakeDevice6) recv(timeout time.Duration) (bacnet.APDU, *net.UDPAddr, bacnet.VMAC, error) {
+	_ = d.conn.SetReadDeadline(time.Now().Add(timeout))
+	buf := make([]byte, 65535)
+	for {
+		n, src, err := d.conn.ReadFromUDP(buf)
+		if err != nil {
+			return bacnet.APDU{}, nil, bacnet.VMAC{}, err
+		}
+		b, err := bacnet.ParseBVLC6(buf[:n])
+		if err != nil {
+			return bacnet.APDU{}, nil, bacnet.VMAC{}, fmt.Errorf("ipv6 device bvlc6: %w", err)
+		}
+		switch b.Function {
+		case bacnet.BVLC6VirtualAddressResolution:
+			ack := bacnet.BVLC6{Function: bacnet.BVLC6VirtualAddressResolutionACK,
+				Src: d.vmac, Dst: b.Src}.Marshal()
+			if _, err := d.conn.WriteToUDP(ack, src); err != nil {
+				return bacnet.APDU{}, nil, bacnet.VMAC{}, err
+			}
+			continue
+		case bacnet.BVLC6OriginalUnicastNPDU, bacnet.BVLC6OriginalBroadcastNPDU:
+		default:
+			return bacnet.APDU{}, nil, bacnet.VMAC{}, fmt.Errorf("ipv6 device got function %s", b.Function)
+		}
+		np, err := bacnet.ParseNPDU(b.Data)
+		if err != nil {
+			return bacnet.APDU{}, nil, bacnet.VMAC{}, fmt.Errorf("ipv6 device npdu: %w", err)
+		}
+		a, err := bacnet.ParseAPDU(np.APDU)
+		if err != nil {
+			return bacnet.APDU{}, nil, bacnet.VMAC{}, fmt.Errorf("ipv6 device apdu: %w", err)
+		}
+		return a, src, b.Src, nil
+	}
+}
+
+func (d *fakeDevice6) mustRecv(t *testing.T, timeout time.Duration) (bacnet.APDU, *net.UDPAddr, bacnet.VMAC) {
+	t.Helper()
+	a, src, proxyVMAC, err := d.recv(timeout)
+	if err != nil {
+		t.Fatalf("ipv6 device receive: %v", err)
+	}
+	return a, src, proxyVMAC
+}
+
+func (d *fakeDevice6) send(t *testing.T, a bacnet.APDU, to *net.UDPAddr, proxyVMAC bacnet.VMAC) {
+	t.Helper()
+	frame := bacnet.BVLC6{
+		Function: bacnet.BVLC6OriginalUnicastNPDU,
+		Src:      d.vmac,
+		Dst:      proxyVMAC,
+		Data:     bacnet.NPDU{APDU: a.Marshal()}.Marshal(),
+	}.Marshal()
+	if _, err := d.conn.WriteToUDP(frame, to); err != nil {
+		t.Fatalf("ipv6 device send: %v", err)
+	}
+}
+
+func (d *fakeDevice6) expectNothing(t *testing.T, wait time.Duration) {
+	t.Helper()
+	if _, _, _, err := d.recv(wait); err == nil {
+		t.Fatal("ipv6 device received an unexpected datagram")
+	} else if !isTimeout(err) {
+		t.Fatalf("ipv6 device read: %v", err)
+	}
+}
+
+func waitDeviceVMAC(t *testing.T, f *fixture) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.g.deviceVMAC.Load() != nil {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("device virtual address was not resolved")
+}
+
+func TestGatewayIPv6DeviceLegWithIPv4Client(t *testing.T) {
+	dev := newFakeDevice6(t)
+	f := startGateway(t, Config{ListenAddr: "127.0.0.1:0", DeviceAddr: dev.addr().String()}, nil)
+	dev.answerResolution(t)
+	waitDeviceVMAC(t, f)
+	c := newTestClient(t)
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 5}
+
+	c.send(readProperty(7, oid, bacnet.PropertyPresentValue), f.addr())
+	req, src, proxyVMAC := dev.mustRecv(t, 2*time.Second)
+	if req.Service != bacnet.ServiceReadProperty {
+		t.Fatalf("device request = %+v", req)
+	}
+	dev.send(t, readPropertyACK(req.InvokeID, oid, bacnet.PropertyPresentValue,
+		[]byte{0x44, 0x3F, 0x80, 0x00, 0x00}), src, proxyVMAC)
+
+	got, _ := c.mustRecv(t, time.Second)
+	if got.Type != bacnet.PDUComplexACK || got.InvokeID != 7 {
+		t.Fatalf("client answer = %+v", got)
+	}
+}
+
+func TestGatewayIPv6BothLegs(t *testing.T) {
+	dev := newFakeDevice6(t)
+	f := startGateway(t, Config{ListenAddr: "[::1]:0", DeviceAddr: dev.addr().String()}, nil)
+	dev.answerResolution(t)
+	waitDeviceVMAC(t, f)
+	c := newTestClient6(t)
+	proxyVMAC := discoverProxyVMAC(t, c, f.addr())
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 5}
+
+	c.sendFrame(bacnet.BVLC6{Function: bacnet.BVLC6OriginalUnicastNPDU,
+		Src: c.vmac, Dst: proxyVMAC, Data: ipv6NPDU(readProperty(7, oid, bacnet.PropertyPresentValue))}.Marshal(), f.addr())
+
+	req, src, deviceProxyVMAC := dev.mustRecv(t, 2*time.Second)
+	dev.send(t, readPropertyACK(req.InvokeID, oid, bacnet.PropertyPresentValue,
+		[]byte{0x44, 0x3F, 0x80, 0x00, 0x00}), src, deviceProxyVMAC)
+
+	got := c.mustRecv(t, time.Second)
+	if got.Function != bacnet.BVLC6OriginalUnicastNPDU || got.Dst != c.vmac {
+		t.Fatalf("client answer frame = %+v", got)
+	}
+}
+
+func TestGatewayIPv6DeviceWriteDenied(t *testing.T) {
+	dev := newFakeDevice6(t)
+	f := startGateway(t, Config{ListenAddr: "127.0.0.1:0", DeviceAddr: dev.addr().String()}, readOnlyPolicy(t))
+	c := newTestClient(t)
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 5}
+
+	c.send(writeProperty(7, oid, bacnet.PropertyPresentValue), f.addr())
+	got, _ := c.mustRecv(t, time.Second)
+	if got.Type != bacnet.PDUError {
+		t.Fatalf("denial = %+v", got)
+	}
+	dev.expectNothing(t, 250*time.Millisecond)
+}
+
+// A device that never answers address resolution cannot be sent a unicast
+// frame. The request is dropped instead of being sent with a bogus virtual
+// address, and the client can retransmit once resolution succeeds.
+func TestGatewayIPv6DeviceUnresolved(t *testing.T) {
+	conn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback, Port: 0})
+	if err != nil {
+		t.Fatalf("silent ipv6 device bind: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	f := startGateway(t, Config{ListenAddr: "127.0.0.1:0", DeviceAddr: conn.LocalAddr().String()}, nil)
+	c := newTestClient(t)
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 5}
+
+	c.send(readProperty(7, oid, bacnet.PropertyPresentValue), f.addr())
+	c.expectNothing(t, 300*time.Millisecond)
+	if n := testutil.ToFloat64(f.metrics.Forwarded); n != 0 {
+		t.Fatalf("forwarded = %v, want 0 while the device vmac is unknown", n)
+	}
 }
