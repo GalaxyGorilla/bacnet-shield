@@ -517,3 +517,45 @@ func TestGatewaySCReplayCacheServesRepeatRequest(t *testing.T) {
 		t.Fatalf("replayed answer for %v, want %v", got, oid)
 	}
 }
+
+// TestGatewaySCSegmentedWrite proves the segmented-write path is leg-neutral:
+// an SC client's segments are acknowledged over the SC leg, the reassembled
+// write is forwarded on the clear device leg, and the answer comes back to the
+// client's VMAC.
+func TestGatewaySCSegmentedWrite(t *testing.T) {
+	dev := newFakeDevice(t, "127.0.0.1")
+	f := startGateway(t, Config{DeviceAddr: dev.addr().String()}, writePolicy(t, access.ActionAllow, nil))
+	leg := &fakeSCLeg{}
+	f.g.AttachSC(leg)
+
+	client := sc.MAC{0x02, 0x00, 0x00, 0x00, 0x00, 0x0C}
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 5}
+	w := writeProperty(7, oid, bacnet.PropertyPresentValue)
+	half := len(w.Payload) / 2
+
+	leg.deliver(t, client, bacnet.NPDU{}, segmentedWrite(7, 0, true, w.Service, w.Payload[:half]))
+	ack := decodeSCNPDU(t, leg.wait(t, 1, 2*time.Second)[0].npdu)
+	if ack.Type != bacnet.PDUSegmentACK || !ack.Server || ack.InvokeID != 7 || ack.SequenceNumber != 0 {
+		t.Fatalf("SC segment ack = %+v", ack)
+	}
+	dev.expectNothing(t, 150*time.Millisecond)
+
+	leg.deliver(t, client, bacnet.NPDU{}, segmentedWrite(7, 1, false, w.Service, w.Payload[half:]))
+	req, _, src := dev.mustRecv(t, 2*time.Second)
+	if req.Type != bacnet.PDUConfirmedRequest || req.Segmented || req.Service != bacnet.ServiceWriteProperty {
+		t.Fatalf("device request = %+v", req)
+	}
+	if !bytes.Equal(req.Payload, w.Payload) {
+		t.Fatalf("reassembled payload = %x, want %x", req.Payload, w.Payload)
+	}
+	dev.send(t, simpleACK(req.InvokeID, bacnet.ServiceWriteProperty), src)
+
+	sent := leg.wait(t, 2, 2*time.Second)
+	if sent[1].dest != client {
+		t.Fatalf("answer sent to %s, want %s", sent[1].dest, client)
+	}
+	resp := decodeSCNPDU(t, sent[1].npdu)
+	if resp.Type != bacnet.PDUSimpleACK || resp.InvokeID != 7 {
+		t.Fatalf("SC client response = %+v", resp)
+	}
+}
