@@ -34,6 +34,11 @@ devices:
     # For several devices, give each its own local IP on port 47808, so a
     # client's broadcast Who-Is still reaches the whole building. If the device
     # and the proxy share a host, give the proxy a different port here.
+    #
+    # An IPv6 literal selects the BACnet/IPv6 front leg instead:
+    #   listen_addr: "[::]:47808"      # all IPv6 interfaces
+    #   listen_addr: "[::1]:47808"     # loopback (tests)
+    # The device leg stays plain IPv4; a mixed listener is the retrofit shape.
     listen_addr: ":47808"
 
     # The one legacy device on the clear leg. It must be a unicast IPv4 address.

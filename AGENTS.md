@@ -45,9 +45,10 @@ rewritten, and only the front-leg policy can reject a request.
 | Config changes | `SIGHUP` re-reads `--config` and swaps only the access policy (including `access.sc_allow`). Listener/device/timeout/log/metrics and the whole `sc` block are reported as restart-only warnings. Invalid reload keeps the running policy |
 | Secure front leg | BACnet/SC (TLS 1.3 + WebSocket, BVLC-SC `0x82`). The proxy is an SC **node** that attaches to an existing hub (primary + failover), not a hub itself. A private PSK tunnel is explicitly rejected |
 | Front-leg identity | One `peer` abstraction (`Key`, `IP`, `SendNPDU`) keyed by `ip:port` on the IP leg and `sc:<vmac>` on the SC leg. The data plane and its replay cache hold **NPDUs**, not link frames, so both legs share pending, replay, COV and write policy. Never key SC state by connection |
-| SC client admission | Opt-in SC allow-list keyed by **VMAC** (`access.sc_allow`). With none configured, any node the hub delivers is accepted and only the write policy gates it (same "protection is opt-in" shape as the IP leg). UUID-keyed rules need Address-Resolution, which the node does not implement; do not silently accept a UUID entry |
+| SC client admission | Opt-in SC allow-list keyed by **VMAC** (`access.sc_allow`). With none configured, any node the hub delivers is accepted and only the write policy gates it (same "protection is opt-in" shape as the IP leg). UUID-keyed rules cannot be enforced through a hub; a UUID entry is rejected rather than silently ignored |
 | SC transport | TLS 1.3 (`crypto/tls`) + a small, fuzzed WebSocket frame parser we own, not a WebSocket dependency. The proxy is always the WebSocket client. The hub is trusted to attribute frames to their originating VMAC; the node still drops a frame addressed to another VMAC or with a zero/missing origin |
-| Device leg | Always plain BACnet/IPv4 over UDP, even when the front leg is SC. The SC leg is additive, not a replacement for the IP listener |
+| Device leg | Always plain BACnet/IPv4 over UDP, even when the front leg is SC or IPv6. The SC and IPv6 legs are additive, not a replacement for the IPv4 listener |
+| IPv6 front leg | Opt-in by using an IPv6 literal in `listen_addr`. Parse BACnet/IPv6 (Annex U, link type `0x82`, 3-octet virtual addresses, address resolution), reduce the frame to its NPDU, and use the same data plane. The proxy derives its own virtual address from the bound listener; the device leg stays IPv4 |
 | Ground truth | ASHRAE 135 wire formats, cross-checked against **bacpypes3 0.0.110** in `.venv`. Vendor divergence is reported in [CONFORMANCE.md](CONFORMANCE.md), never silently adapted away in the proxy |
 | Audit | Opt-in structured stream (`audit.file`), one JSON object per security decision (ACL, rate, device budget, write policy, unsupported subscription), with the decoded target and a closed-set reason for a refused write. Bounded stream: a rotating file (one backup) plus a bounded non-blocking queue that drops-and-counts. Observes decisions; never changes them |
 | No CI | Deliberate user decision across the Shield projects. Gates are local `make` targets |
@@ -56,7 +57,7 @@ rewritten, and only the front-leg policy can reject a request.
 
 ```
 cmd/bacnet-shield/     CLI: gateway | validate | selftest | version | help
-internal/bacnet/       Wire codecs (BVLC, NPDU, APDU, tags, object IDs, services)
+internal/bacnet/       Wire codecs (BVLC, BVLC6, NPDU, APDU, tags, object IDs, services)
 internal/bacnet/sc/    BACnet/SC virtual link layer (BVLL-SC) codec
 internal/scnet/        SC transport: TLS 1.3, WebSocket framing, node↔hub state machine
 internal/access/       Allow-list, per-client token bucket, shared device budget, write policy
@@ -126,6 +127,14 @@ them. Inside one gateway:
 - BVLC length includes the 4-byte header. Only `0x0A` (Original-Unicast) and
   `0x0B` (Original-Broadcast) are accepted from a client; other functions are
   counted unsupported.
+- BACnet/IPv6 frames use link type `0x82`, not `0x81`: Original-Unicast is
+  function `0x01` with a 3-octet source and destination virtual address,
+  Original-Broadcast is `0x02` with a source only. A frame of the wrong family
+  is a parse error, never guessed at. VirtualAddressResolution (`0x06`) and
+  AddressResolution (`0x03`) are answered at the link layer for an admitted
+  client; every other IPv6 function (Forwarded-NPDU, foreign-device,
+  Distribute-Broadcast) is counted unsupported. The NPDU inside is the same
+  network/application payload, which is why both legs share one data plane.
 - A client broadcast is forwarded to **that listener's device** as unicast. Each
   listener has exactly one device, so a broadcast is a discovery request aimed
   at it; it is never routed to another co-hosted device.
@@ -217,7 +226,8 @@ file to re-read and the flags came from the command line.
 - **Test volume is fine** — 10× the operational code is acceptable when the
   suite is structured and maintainable. Share fixtures (`harness_test.go`)
   instead of copying them.
-- **Fuzz targets** live in `internal/bacnet/fuzz_test.go`, the SC codec
+- **Fuzz targets** live in `internal/bacnet/fuzz_test.go` (including
+  `FuzzParseBVLC6` for the IPv6 link layer), the SC codec
   (`internal/bacnet/sc/fuzz_test.go`: `FuzzParse` for the header and
   `FuzzDecodeMessage` for every typed body decoder), and the WebSocket frame
   parser (`internal/scnet` `FuzzParseFrame`). Every parser entry point has one;
@@ -296,6 +306,12 @@ Done in v1:
   identity, opt-in `access.sc_allow`, per-VMAC rate bucket, and the shared
   pending/replay/COV/write-policy path. Config (`sc:` block and flags),
   `sc_allow` reload, and an opt-in VMAC list.
+- IPv6 front leg (B10, first stage): BACnet/IPv6 link type `0x82` with
+  3-octet virtual addresses, original unicast/broadcast, and the two
+  address-resolution exchanges. Selected by using an IPv6 literal in
+  `listen_addr`; the proxy derives its own virtual address from the bound
+  listener. The data plane, ACL, rate limit, COV and write policy are shared
+  with the IPv4 leg, and the device leg stays IPv4.
 - SC data-plane tests: two clients with the same invoke ID, an IP and an SC
   client sharing an invoke ID, per-VMAC ACL and rate, per-leg rate isolation,
   write denial with the tagged Error PDU, replay across the leg boundary, COV
@@ -336,6 +352,12 @@ Known boundaries:
   enforce it.
 - No SC hub role and no SC direct (node-to-node) connections; the proxy is
   always a WebSocket client of a hub.
+- No BACnet/IPv6 on the **device** leg yet. The front leg accepts IPv6
+  clients; the clear device leg is still plain IPv4, and `device_addr` is
+  rejected if it is not IPv4. No independent IPv6 peer is available to drive
+  the front leg yet (bacpypes3's application layer raises
+  `NotImplementedError` for IPv6), so the IPv6 path is pinned by wire-level Go
+  tests and a fuzz target.
 - No BBMD/router and no traffic between co-hosted devices; each entry is an
   isolated listener↔device pair.
 - Segmented *write* reassembly: the proxy acknowledges the client's segments,

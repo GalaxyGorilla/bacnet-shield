@@ -184,6 +184,36 @@ func FuzzCOVMultiple(f *testing.F) {
 	})
 }
 
+// FuzzParseBVLC6 is the IPv6 link-layer counterpart of FuzzParseBVLC. The
+// Python peer has no IPv6 application, so the fuzz corpus is the main
+// adversarial input for this parser.
+func FuzzParseBVLC6(f *testing.F) {
+	for _, s := range []string{
+		"8201000c02000a0200ff0104",
+		"8202000902000a0104",
+		"8203000a02000a0200ff",
+		"8206000702000a",
+		"8207000a02000a0200ff",
+		"820000060090",
+	} {
+		f.Add(seedHex(f, s))
+	}
+	f.Fuzz(func(t *testing.T, dg []byte) {
+		b, err := ParseBVLC6(dg)
+		if err != nil {
+			return
+		}
+		again, err := ParseBVLC6(b.Marshal())
+		if err != nil {
+			t.Fatalf("marshal produced an unparseable frame: %v (%x)", err, dg)
+		}
+		if again.Function != b.Function || again.Src != b.Src || again.Dst != b.Dst ||
+			!bytes.Equal(again.Data, b.Data) {
+			t.Fatalf("round trip changed the frame: %+v vs %+v", again, b)
+		}
+	})
+}
+
 func FuzzTagReader(f *testing.F) {
 	f.Add(seedHex(f, "0c0080000519553e443f8000003f"))
 	f.Add(seedHex(f, "f9142a"))

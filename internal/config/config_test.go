@@ -256,6 +256,18 @@ func TestDecodeUnknownKeyFails(t *testing.T) {
 	}
 }
 
+func TestValidateIPv6FrontLeg(t *testing.T) {
+	// The front leg may be IPv6 while the device leg stays IPv4; that is the
+	// retrofit shape this feature targets.
+	c, err := decode(t, oneDevice("listen_addr: \"[::1]:47808\"\ndevice_addr: 192.0.2.10:47808\n"))
+	if err != nil {
+		t.Fatalf("IPv6 front leg rejected: %v", err)
+	}
+	if got := c.Devices[0].ListenAddr; got != "[::1]:47808" {
+		t.Fatalf("listen_addr = %q", got)
+	}
+}
+
 func TestValidateRejections(t *testing.T) {
 	cases := []struct {
 		name string
@@ -268,6 +280,8 @@ func TestValidateRejections(t *testing.T) {
 		{"bad listen", oneDevice("device_addr: 192.0.2.10:47808\nlisten_addr: nope\n")},
 		{"same legs", oneDevice("device_addr: :47808\nlisten_addr: :47808\n")},
 		{"bad device port", oneDevice("device_addr: 192.0.2.10:99999\n")},
+		{"ipv6 device addr", oneDevice("device_addr: \"[::1]:47808\"\n")},
+		{"ipv6 device local", oneDevice("device_addr: 192.0.2.10:47808\ndevice_local_addr: \"[::1]:47808\"\n")},
 		{"instance too large", oneDevice("device_addr: 192.0.2.10:47808\ndevice_instance: 4194304\n")},
 		{"timeout zero", oneDevice("device_addr: 192.0.2.10:47808\nrequest_timeout_secs: -1\n")},
 		{"timeout huge", oneDevice("device_addr: 192.0.2.10:47808\nrequest_timeout_secs: 601\n")},

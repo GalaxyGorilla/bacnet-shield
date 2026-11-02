@@ -47,7 +47,9 @@ import (
 // Config is the gateway's runtime shape. The command layer maps the YAML/flags
 // config onto it; the proxy does not read files.
 type Config struct {
-	// ListenAddr is the client leg. ":47808" is the BACnet/IP port.
+	// ListenAddr is the client leg. ":47808" is the BACnet/IP port. An IPv6
+	// literal (for example "[::]:47808") selects the BACnet/IPv6 link layer
+	// for this listener; the device leg remains IPv4.
 	ListenAddr string
 	// DeviceAddr is the one legacy device on the clear leg. It must be a
 	// unicast IPv4 address: the proxy accepts device-leg datagrams only from
@@ -120,6 +122,8 @@ type Gateway struct {
 	policy  atomic.Pointer[access.Policy]
 
 	clientConn *net.UDPConn
+	clientIPv6 bool
+	clientVMAC bacnet.VMAC
 	deviceConn *net.UDPConn
 	deviceAddr *net.UDPAddr
 	deviceIP   net.IP
@@ -168,15 +172,20 @@ func New(cfg Config, pol *access.Policy, log *zap.Logger, m *observ.Metrics) (*G
 		return nil, fmt.Errorf("proxy: device address %q: %w", cfg.DeviceAddr, err)
 	}
 	if deviceAddr.IP == nil || deviceAddr.IP.To4() == nil {
-		return nil, fmt.Errorf("proxy: device address %q is not IPv4 (BACnet/IPv6 is not supported)", cfg.DeviceAddr)
+		return nil, fmt.Errorf("proxy: device address %q is not IPv4 (the device leg is IPv4-only)", cfg.DeviceAddr)
 	}
-	listenAddr, err := net.ResolveUDPAddr("udp4", cfg.ListenAddr)
+	listenAddr, network, err := resolveListen(cfg.ListenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("proxy: listen address %q: %w", cfg.ListenAddr, err)
 	}
-	clientConn, err := net.ListenUDP("udp4", listenAddr)
+	clientConn, err := net.ListenUDP(network, listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("proxy: bind client leg %q: %w", cfg.ListenAddr, err)
+	}
+	clientIPv6 := network == "udp6"
+	var clientVMAC bacnet.VMAC
+	if clientIPv6 {
+		clientVMAC = deriveVMAC(listenAddr)
 	}
 	var local *net.UDPAddr
 	if cfg.DeviceLocalAddr != "" {
@@ -198,6 +207,8 @@ func New(cfg Config, pol *access.Policy, log *zap.Logger, m *observ.Metrics) (*G
 		metrics:      m,
 		audit:        cfg.Audit,
 		clientConn:   clientConn,
+		clientIPv6:   clientIPv6,
+		clientVMAC:   clientVMAC,
 		deviceConn:   deviceConn,
 		deviceAddr:   deviceAddr,
 		deviceIP:     deviceAddr.IP.To4(),

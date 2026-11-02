@@ -169,8 +169,35 @@ devices:
 ```
 
 Planned work and explicit non-goals are recorded in [BACKLOG.md](BACKLOG.md):
-a BBMD/router role, segmented-write decoding and UUID-keyed SC admission are
-deliberately out of the v1 scope.
+a BBMD/router role, an IPv6 device leg and physical commissioning remain out
+of the current scope; UUID-keyed SC admission is not enforceable through a hub
+and is documented there.
+
+### IPv6 front leg
+
+The client-facing listener may speak BACnet/IPv6 (Annex U): use an IPv6
+literal for `listen_addr`, for example `"[::1]:47808"` or `"[::]:47808"`. The
+proxy then accepts the IPv6 link-layer type (`0x82`), answers virtual-address
+resolution, and keeps the same allow-list, rate limit, write policy, COV
+routing and metrics. The **device leg stays plain IPv4** in this release, so the
+usual retrofit shape is an IPv6 client network in front of an old IPv4
+controller.
+
+```yaml
+devices:
+  - name: boiler
+    listen_addr: "[::]:47808"      # IPv6 clients
+    device_addr: "10.0.0.42:47808" # legacy IPv4 device
+    access:
+      allow: ["2001:db8:10::/48"]  # IPv6 allow-list / rate limits apply
+      read_only: true
+```
+
+A client discovers the proxy's 3-octet virtual address with
+`VirtualAddressResolution`; the proxy derives a stable address from its bound
+listener, so no extra configuration is needed. `device_addr` and
+`device_local_addr` must stay IPv4 and are rejected during validation if they
+are not.
 
 ## Scope
 
@@ -185,7 +212,7 @@ pairs in one process, not a BACnet device stack and not a router.
 | Confirmed and unconfirmed services, payload opaque | Service translation or object/property remapping |
 | SubscribeCOV, SubscribeCOVProperty and SubscribeCOVPropertyMultiple | Segmented subscriptions (denied fail-closed) |
 | Segmented requests and responses, including authorized segmented writes | Segmented writes larger than the 16 KiB reassembly bound |
-| IPv4 BACnet/IP on the device leg | BACnet/IPv6 |
+| IPv6 BACnet/IP clients on the front leg | BACnet/IPv6 on the device leg (still IPv4) |
 
 A client broadcast is forwarded to **that listener's device** as unicast: a
 device's listener has exactly one device, so a broadcast is a discovery request

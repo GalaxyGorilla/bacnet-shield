@@ -40,6 +40,11 @@ func (g *Gateway) handleClient(dg []byte, src *net.UDPAddr) {
 		return
 	}
 
+	if g.clientIPv6 {
+		g.handleClientIPv6(dg, src, now, pol)
+		return
+	}
+
 	b, err := bacnet.ParseBVLC(dg)
 	if err != nil {
 		g.metrics.ParseErrors.Inc()

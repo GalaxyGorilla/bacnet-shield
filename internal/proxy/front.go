@@ -30,16 +30,31 @@ type peer interface {
 }
 
 // udpPeer is a BACnet/IP client. A datagram's source address is its identity,
-// which is exactly what the v1 gateway already used.
+// which is exactly what the v1 gateway already used. An IPv6 client also has a
+// 3-octet virtual address in the link frame; it is kept here so the response
+// can be addressed back to the sender.
 type udpPeer struct {
-	addr *net.UDPAddr
-	conn *net.UDPConn
+	addr      *net.UDPAddr
+	conn      *net.UDPConn
+	ipv6      bool
+	vmac      bacnet.VMAC // client's source virtual address (IPv6 only)
+	localVMAC bacnet.VMAC // this gateway's virtual address (IPv6 only)
 }
 
 func (p *udpPeer) Key() string    { return p.addr.String() }
 func (p *udpPeer) String() string { return p.addr.String() }
 
 func (p *udpPeer) SendNPDU(npdu []byte) error {
+	if p.ipv6 {
+		frame := bacnet.BVLC6{
+			Function: bacnet.BVLC6OriginalUnicastNPDU,
+			Src:      p.localVMAC,
+			Dst:      p.vmac,
+			Data:     npdu,
+		}.Marshal()
+		_, err := p.conn.WriteToUDP(frame, p.addr)
+		return err
+	}
 	frame := bacnet.BVLC{Function: bacnet.BVLCOriginalUnicastNPDU, Data: npdu}.Marshal()
 	_, err := p.conn.WriteToUDP(frame, p.addr)
 	return err

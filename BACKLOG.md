@@ -177,9 +177,19 @@ closed-set reason. See [README.md](README.md#audit-trail),
 
 ### B10 — BACnet/IPv6
 
-v1 resolves and binds IPv4 only, and rejects non-IPv4 device addresses
-explicitly. IPv6 support needs its own address handling, ACL semantics and
-tests; it is not a flag flip.
+DONE for the front leg. An IPv6 literal in `listen_addr` selects the
+BACnet/IPv6 link layer (type `0x82`): original unicast/broadcast, the two
+address-resolution exchanges, a derived 3-octet virtual address, and the same
+ACL, rate limit, COV and write policy as the IPv4 leg. The device leg stays
+plain IPv4, which is the common retrofit shape (IPv6 client network, legacy
+IPv4 controller). `device_addr` is rejected if it is not IPv4.
+
+Open: an **IPv6 device leg**. That needs the same link-layer work on the clear
+side plus a decided mixed-family policy (an IPv6 listener in front of an IPv4
+device already works because the data plane holds NPDUs). No independent IPv6
+application peer exists yet (bacpypes3's `Application` raises
+`NotImplementedError("IPv6")`), so the front leg is pinned by Go wire tests and
+`FuzzParseBVLC6`.
 
 ## Open — appliance management integration
 

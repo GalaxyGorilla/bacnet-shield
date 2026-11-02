@@ -41,11 +41,15 @@ still return plausible false process data.
 ## Enforced controls
 
 - Strict BVLC/NPDU/APDU framing with bounded lengths; only Original-Unicast and
-  Original-Broadcast are accepted, and routing fields are stripped.
+  Original-Broadcast are accepted, and routing fields are stripped. The IPv6
+  front leg applies the same rule to link type `0x82`: the frame family must
+  match the listener, and the NPDU is the only part that crosses into the data
+  plane.
 - Client allow-list and a per-client token-bucket rate limit; an off-list
-  source never consumes another client's budget. The SC leg has a VMAC
-  allow-list and a VMAC-keyed bucket; an IP allow-list entry and a VMAC entry
-  never share a bucket.
+  source never consumes another client's budget. The same list and limiter
+  apply to IPv6 sources, and an off-list IPv6 peer gets no link-layer answer
+  either. The SC leg has a VMAC allow-list and a VMAC-keyed bucket; an IP
+  allow-list entry and a VMAC entry never share a bucket.
 - SC transport is TLS 1.3 only, with hub certificate verification (system roots
   or a configured CA) and an optional client certificate. A plaintext `ws://`
   hub is rejected outside tests.

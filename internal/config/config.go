@@ -260,8 +260,14 @@ func (d *Device) validate(i int, seenNames map[string]bool, seenListen map[strin
 	if err := validateHostPort("device_addr", d.DeviceAddr); err != nil {
 		return fail("%s", err)
 	}
+	if err := validateIPv4("device_addr", d.DeviceAddr); err != nil {
+		return fail("%s", err)
+	}
 	if d.DeviceLocalAddr != "" {
 		if err := validateHostPort("device_local_addr", d.DeviceLocalAddr); err != nil {
+			return fail("%s", err)
+		}
+		if err := validateIPv4("device_local_addr", d.DeviceLocalAddr); err != nil {
 			return fail("%s", err)
 		}
 	}
@@ -398,6 +404,23 @@ func (d *Device) DeviceObjectID() (bacnet.ObjectID, bool) {
 		return bacnet.ObjectID{}, false
 	}
 	return bacnet.ObjectID{Type: bacnet.ObjectDevice, Instance: *d.DeviceInstance}, true
+}
+
+// validateIPv4 rejects an IPv6 literal for a leg that is IPv4-only. The
+// listen address may be IPv6 (the front leg supports BACnet/IPv6), but the
+// clear device leg is still plain BACnet/IPv4.
+func validateIPv4(field, addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%s %q: %w", field, addr, err)
+	}
+	if host == "" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		return fmt.Errorf("%s %q is IPv6; the device leg is IPv4-only", field, addr)
+	}
+	return nil
 }
 
 // validateHostPort checks a UDP or HTTP listener address. Both are a host

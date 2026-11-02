@@ -209,8 +209,13 @@ the log line is the whole response.
 - **No BACnet/SC direct (node-to-node) interop.** The proxy attaches to a hub,
   which is the v1 shape. Direct connections are out of scope; see
   [BACKLOG.md](BACKLOG.md).
-- **No BBMD, foreign-device registration or IPv6.** These are outside the v1
-  scope; see [BACKLOG.md](BACKLOG.md).
+- **No BBMD or foreign-device registration.** These are outside the scope; see
+  [BACKLOG.md](BACKLOG.md).
+- **The IPv6 front leg has no independent application peer.** bacpypes3's
+  Annex U link layer exists, but its `Application` raises
+  `NotImplementedError("IPv6")`, so the IPv6 path is covered by Go wire tests
+  and a fuzz target rather than by a third-party client. The device leg stays
+  IPv4.
 - **No formal conformance suite.** This suite is the anchor; it proves the
   documented behavior against one independent implementation, not certification.
 

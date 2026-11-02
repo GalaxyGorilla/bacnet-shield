@@ -679,8 +679,9 @@ devices without becoming a router:
       device_addr: 10.0.0.43:47808
 
 Give each device its own local IP on the standard port 47808, so a client's
-broadcast Who-Is still reaches the whole building. Flags mode always configures
-exactly one device.
+broadcast Who-Is still reaches the whole building. An IPv6 literal in
+listen_addr selects the BACnet/IPv6 front leg (the device leg stays IPv4):
+listen_addr: "[::]:47808". Flags mode always configures exactly one device.
 
 It rewrites only the network layer and the APDU invoke ID; the service
 payload is forwarded byte for byte, so vendor quirks survive. Client-leg

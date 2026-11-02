@@ -44,7 +44,7 @@ type Options struct {
 func Register(fs *pflag.FlagSet) *Options {
 	o := &Options{}
 	fs.StringVar(&o.ConfigPath, "config", "", "YAML config file (flags below are then ignored)")
-	fs.StringVar(&o.ListenAddr, "listen", ":47808", "client leg address (BACnet/IP)")
+	fs.StringVar(&o.ListenAddr, "listen", ":47808", "client leg address (BACnet/IP; an IPv6 literal selects BACnet/IPv6)")
 	fs.StringVar(&o.DeviceAddr, "device", "", "device leg address (required in flags mode)")
 	fs.StringVar(&o.DeviceLocalAddr, "device-local", "", "source address of the device leg (default: ephemeral)")
 	fs.IntVar(&o.DeviceInstance, "device-instance", -1, "expected device instance (optional)")
