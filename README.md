@@ -569,7 +569,9 @@ no device label.
 
 - **Static binary** — `make release` builds a stripped, CGO-free binary for
   Linux; `make release-all` cross-builds linux-amd64, linux-arm64 and
-  linux-armv7 into `dist/`.
+  linux-armv7 into `dist/`. `make release-assets VERSION=1.0.0` also produces
+  the per-binary SPDX/CycloneDX SBOMs and `SHA256SUMS` the GitHub release
+  carries.
 - **systemd** — [`deploy/bacnet-shield-gateway.service`](deploy/bacnet-shield-gateway.service)
   is a hardened `Type=notify` unit with a 30 s watchdog, `Restart=on-failure`
   and a restricted address-family list (`AF_UNIX` is included for sd_notify).

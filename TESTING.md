@@ -32,6 +32,7 @@ make interop     # built binary against bacpypes3 on both legs
 make interop-sc  # built binary over BACnet/SC against bacnet-stack's hub
 make soak        # opt-in long run; SOAK_DURATION=90s for a quick pass
 make security    # verify + staticcheck + govulncheck + SBOM vulnerability gate
+make release-assets VERSION=1.0.0 # Linux binaries + per-binary SBOMs + SHA256SUMS
 make peers       # provision .venv + bacpypes3 0.0.110 (exit 77 without Python)
 make sc-hub-image # build the bacnet-stack sc-hub Docker image (once)
 ```

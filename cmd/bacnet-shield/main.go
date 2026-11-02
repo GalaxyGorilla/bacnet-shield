@@ -31,8 +31,8 @@ import (
 	"github.com/GalaxyGorilla/bacnet-shield/internal/watchdog"
 )
 
-// version is overridden for releases via ldflags.
-var version = "0.1.0"
+// version is overridden for releases via -ldflags "-X main.version=...".
+var version = "1.0.0"
 
 func main() {
 	os.Exit(run())
