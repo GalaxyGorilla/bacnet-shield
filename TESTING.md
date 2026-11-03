@@ -133,6 +133,19 @@ flatness plus both pending gauges at zero. The multi-client variant keeps eight
 independent clients on one device, exercising the per-client invoke-ID space
 and the pending table under concurrent allocation.
 
+A full 10-minute run on 2026-11-03:
+
+```
+rate limiter   10m0s, 1032192 admitted / 4210985599 refused, table 4096/4096,
+               goroutines 2
+steady state   10m0s, 95092 requests, worst round trip 34ms,
+               goroutines 7 (baseline 7, peak 7), live heap 0.6MiB -> 0.6MiB
+multi-device   10m0s, 88529 rounds, worst round trip 29ms,
+               goroutines 12 (baseline 12, peak 12), live heap 0.9MiB -> 0.9MiB
+multi-client   10m0s, 8 clients, 704876 requests, goroutines 7 (baseline 16,
+               peak 16), live heap 0.7MiB -> 1.1MiB
+```
+
 ## Independent peer
 
 `scripts/peers-setup.sh` creates `.venv` and installs `bacpypes3==0.0.110`.
