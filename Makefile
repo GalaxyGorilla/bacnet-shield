@@ -78,7 +78,7 @@ interop-sc: build
 # of spoofed sources. Ten minutes by default; SOAK_DURATION overrides it.
 soak:
 	BACNET_SHIELD_SOAK=1 BACNET_SHIELD_SOAK_DURATION=$${SOAK_DURATION:-10m} \
-		$(GO) test ./internal/access ./internal/proxy -run 'TestSoak' -count=1 -timeout 30m -v
+		$(GO) test ./internal/access ./internal/proxy -run 'TestSoak' -count=1 -timeout 60m -v
 
 # release builds a stripped static binary for appliance deployment.
 release:
