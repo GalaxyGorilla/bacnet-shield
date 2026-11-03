@@ -203,6 +203,17 @@ third-party implementation. It found the originating-VMAC defect recorded in
 [CONFORMANCE.md](CONFORMANCE.md); do not run it concurrently with another
 interop run — host port `50050` and the `127.0.0.1:4781x` ports collide.
 
+## Focused mutation checks
+
+Not full mutation testing. Each row was applied to a clean tree, the named
+test failed, and the file was restored.
+
+| Invariant broken | Mutation | Test that caught it |
+|---|---|---|
+| Write policy default deny | `return false, "default_deny"` → `return true, ""` | `TestGatewayWriteMultipleStraddleDenied` |
+| Rate-limit table cap | `len(buckets) >= maxBuckets` → `false` | `TestLimitTableCapAndSweep` |
+| Segmented-write authorization | skip the `WriteVerdict` denial branch | `TestGatewaySegmentedWriteDenied` |
+
 ## Remaining hardware boundary
 
 The single-machine suite cannot reproduce every controller, gateway or target
