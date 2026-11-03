@@ -66,16 +66,16 @@ steps, not missing pieces of the documented co-hosting gateway.
   latency histogram plus `request_timeouts_total` make a slow device visible
   before clients time out.
 
-## Open
+## Open — remaining limits
 
-### B1 — BACnet/SC front leg
+### B1 — BACnet/SC front leg — implemented, one admission limit
 
-Implement the standard secure connect front leg: TLS 1.3, WebSocket,
+The standard secure connect front leg is implemented: TLS 1.3, WebSocket,
 BVLC-SC (`0x82`), hub/route handling. This is the reason the project does not
 grow a private PSK tunnel: the secure leg should be a standard boundary that
 other BACnet stacks can join.
 
-Done:
+Implemented:
 
 - BVLL-SC codec (`internal/bacnet/sc`), golden-byte cross-checked against
   bacpypes3 and bacnet-stack, with a fuzz target.
@@ -100,7 +100,7 @@ Done:
   `bacnet_shield_sc_reconnects_total` (counter). `make interop-sc` scrapes
   both across the hub restart, so a hub outage is visible on `/metrics`.
 
-Remaining:
+Remaining limitation:
 
 - UUID-keyed admission is not implementable for hub-delivered traffic. The
   hub attributes a frame to a VMAC only; the spec's Address-Resolution returns
