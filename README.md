@@ -602,6 +602,7 @@ make test        # gofmt gate + full race suite
 make verify      # build + race suite + vet
 make acceptance  # verify + independent bacpypes3 peer
 make soak        # long-running leak and spoofed-source floods (opt-in)
+make cover       # statement coverage + per-package floors (coverage.floors)
 make security    # verify + staticcheck + govulncheck + SBOM scan
 make interop     # built binary against bacpypes3 on both legs
 make interop-sc  # built binary over BACnet/SC against bacnet-stack's hub

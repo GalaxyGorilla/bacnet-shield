@@ -31,6 +31,7 @@ make acceptance  # verify + bacpypes3 interop
 make interop     # built binary against bacpypes3 on both legs
 make interop-sc  # built binary over BACnet/SC against bacnet-stack's hub
 make soak        # opt-in long run; SOAK_DURATION=90s for a quick pass
+make cover       # statement coverage + per-package floors (coverage.floors)
 make security    # verify + staticcheck + govulncheck + SBOM vulnerability gate
 make release-assets VERSION=1.0.0 # Linux binaries + per-binary SBOMs + SHA256SUMS
 make peers       # provision .venv + bacpypes3 0.0.110 (exit 77 without Python)
@@ -42,6 +43,16 @@ when `syft`/`grype` are not installed. `make interop` exits 77 when the peer is
 missing and `make interop-sc` exits 77 when Docker, the `sc-hub` image or
 bacpypes3 is missing, so a bare machine stays green. A release run treats both
 as failures.
+
+## Coverage gate
+
+`make cover` runs the suite with a coverage profile and enforces the
+per-package floors in [`coverage.floors`](coverage.floors). The overall figure
+excludes packages marked `skip` (test-only helpers and tooling), so it tracks
+the production surface. A floor is a regression alarm, not a target: raise it
+when a package improves, and add a test rather than lowering it. Packages run
+serially (`-p 1`) so the socket fixtures cannot steal each other's probed
+ports.
 
 ## Security regressions pinned explicitly
 
@@ -108,6 +119,15 @@ as failures.
   unreachable first hub makes the node fail over to the next one.
 - A malformed or non-binary WebSocket message from the hub costs the
   connection, not the process, and does not desync the node.
+- A WebSocket upgrade with a missing or wrong `Upgrade`, `Connection`,
+  `Sec-WebSocket-Accept`, version or subprotocol is rejected before any
+  BACnet/SC frame is accepted; a fragmented message is reassembled, ping is
+  answered with pong, pong is ignored, and continuation-without-start,
+  a new data frame during fragmentation, an oversize message and an unknown
+  opcode are rejected.
+- A Connect-Accept with an unexpected message ID is ignored; a Result NAK,
+  a malformed accept, a non-binary message or a missing answer fails the
+  attach instead of leaving a half-connected node.
 - An invalid reload keeps the running policy.
 - A bind failure exits without advertising systemd readiness.
 

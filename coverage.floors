@@ -1,0 +1,21 @@
+# Per-package statement-coverage floors for `make cover`.
+#
+# Floors are set just below the measured value so they catch a real
+# regression without failing on a one-line refactor. Raise a floor when a
+# package improves; lower one only with a comment explaining why.
+#
+# `skip` is for packages that are deliberately not part of the production
+# surface (test-only helpers, fixtures, tooling).
+ALL                82
+cmd/bacnet-shield  67
+internal/access    91
+internal/bacnet    81
+internal/bacnet/sc 96
+internal/config    93
+internal/observ    85
+internal/proxy     77
+internal/safego    100
+internal/scnet      88
+internal/watchdog  90
+internal/testkit   skip
+scripts/covercheck skip
