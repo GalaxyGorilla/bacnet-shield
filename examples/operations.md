@@ -5,6 +5,14 @@ install the binary and unit, lay out the config, commission against the real
 device, watch it, reload the policy in place, and diagnose the things that
 actually go wrong.
 
+| I need to… | Go to |
+|---|---|
+| Understand what the proxy does and does not protect | [`../SECURITY.md`](../SECURITY.md) |
+| Pick or change the deployment shape | [`../README.md`](../README.md), [`gateway.md`](gateway.md), [`ipv6.md`](ipv6.md), [`sc.md`](sc.md), [`access-control.md`](access-control.md) |
+| See what the independent stacks found | [`../CONFORMANCE.md`](../CONFORMANCE.md) |
+| See what the tests actually prove | [`../TESTING.md`](../TESTING.md) |
+| Review the architecture and wire-level invariants | [`../AGENTS.md`](../AGENTS.md) |
+
 ## Host assumptions
 
 - A small Linux host (an SBC or a small industrial PC) with a static address on

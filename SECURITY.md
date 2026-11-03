@@ -4,6 +4,11 @@ BACnet Shield is a security boundary in front of one or more legacy BACnet/IP
 devices. It reduces exposure; it does not make an untrusted device, host, or
 clear network segment trustworthy.
 
+Start with [`README.md`](README.md) for deployment shapes,
+[`examples/operations.md`](examples/operations.md) for day-2 operation,
+[`TESTING.md`](TESTING.md) for the evidence and release gates, and
+[`CONFORMANCE.md`](CONFORMANCE.md) for independent-peer results.
+
 ## Protected assets
 
 - Availability of each fragile legacy device and its single upstream socket.
@@ -103,8 +108,10 @@ answered with a BACnet Error PDU (see [README.md](README.md)).
   network or upstream-device exhaustion.
 - Write protection is opt-in: with neither `read_only` nor `write_policy`
   configured, writes pass through unchanged.
-- The proxy does not reassemble segmented payloads and refuses segmented
-  writes; segment-boundary behavior is tracked, not validated end to end.
+- The proxy reassembles client-segmented writes, authorizes the whole request
+  and forwards one unsegmented write. Segmented responses and a
+  device-initiated segmented confirmed COV notification are interop-covered;
+  event-notification segmentation is pinned by in-process tests only.
 - Real hardware, external review and formal BACnet conformance testing remain
   separate validation work (see [CONFORMANCE.md](CONFORMANCE.md) and
   [BACKLOG.md](BACKLOG.md)).
