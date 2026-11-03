@@ -113,10 +113,10 @@ as failures.
 
 ## Soak
 
-`make soak` runs `TestSoakRateLimiterSpoofedSources` and
-`TestSoakSteadyState`. Both are skipped in the normal suite (a ten-minute test
-would make `go test ./...` useless as an edit loop). Override the budget for a
-quick check:
+`make soak` runs `TestSoakRateLimiterSpoofedSources`,
+`TestSoakSteadyState` and `TestSoakMultiDeviceSteadyState`. They are skipped
+in the normal suite (a ten-minute test would make `go test ./...` useless as
+an edit loop). Override the budget for a quick check:
 
 ```sh
 SOAK_DURATION=30s make soak
@@ -126,7 +126,9 @@ The rate-limit soak floods distinct 10/8 source addresses past the 4096-entry
 cap and asserts the table never exceeds it and a never-seen source is refused
 while full. The steady-state soak keeps a real request/response loop running
 and asserts zero unanswered requests, bounded goroutines, bounded live heap
-and a pending gauge back at zero.
+and a pending gauge back at zero. The multi-device variant keeps two
+independent listener↔device pairs busy in one process and asserts the same
+flatness plus both pending gauges at zero.
 
 ## Independent peer
 

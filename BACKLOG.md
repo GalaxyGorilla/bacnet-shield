@@ -18,8 +18,8 @@ steps, not missing pieces of the documented co-hosting gateway.
 - CLI (`gateway`, `validate`, `selftest`, `version`), YAML/flags config,
   `SIGHUP` policy reload, systemd watchdog, Prometheus metrics.
 - bacpypes3 0.0.110 interop on both legs, including reload and read-back.
-- Soak tests for the spoofed-source rate-limit flood and steady-state
-  forwarding.
+- Soak tests for the spoofed-source rate-limit flood, single-device
+  steady-state forwarding, and multi-device co-hosting.
 
 ## Done — post-v1 (kept for reference)
 

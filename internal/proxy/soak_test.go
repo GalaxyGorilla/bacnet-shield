@@ -177,3 +177,98 @@ func TestSoakSteadyState(t *testing.T) {
 		budget, ok, worst.Round(time.Millisecond), runtime.NumGoroutine(), baseGoroutines, maxGoroutines,
 		float64(baseHeap.HeapAlloc)/(1<<20), float64(endHeap.HeapAlloc)/(1<<20))
 }
+
+// TestSoakMultiDeviceSteadyState is the co-hosting variant: two independent
+// listener↔device pairs in one process, each under continuous load. It
+// asserts the same flatness as the single-device soak, plus that neither
+// device's pending table is left behind.
+func TestSoakMultiDeviceSteadyState(t *testing.T) {
+	budget := testkit.SoakDuration(t)
+
+	prop := bacnet.PropertyPresentValue
+	oid := bacnet.ObjectID{Type: bacnet.ObjectAnalogValue, Instance: 1}
+	devA := startEchoDevice(t, oid, prop)
+	devB := startEchoDevice(t, oid, prop)
+	fA := startGateway(t, Config{DeviceAddr: devA.String()}, nil)
+	fB := startGateway(t, Config{DeviceAddr: devB.String()}, nil)
+	cA := newTestClient(t)
+	cB := newTestClient(t)
+	dstA, dstB := fA.addr(), fB.addr()
+
+	// Warm up so the baseline includes both device loops and both sweepers.
+	for i := 0; i < 5; i++ {
+		if err := soakRoundTrip(cA, dstA, oid, prop, byte(i)); err != nil {
+			t.Fatalf("warmup a: %v", err)
+		}
+		if err := soakRoundTrip(cB, dstB, oid, prop, byte(i)); err != nil {
+			t.Fatalf("warmup b: %v", err)
+		}
+	}
+
+	runtime.GC()
+	baseGoroutines := runtime.NumGoroutine()
+	var baseHeap runtime.MemStats
+	runtime.ReadMemStats(&baseHeap)
+
+	var (
+		ok, failed, maxGoroutines int
+		worst                     time.Duration
+		lastErr                   error
+	)
+	sampleEvery := budget / 20
+	if sampleEvery < time.Second {
+		sampleEvery = time.Second
+	}
+	nextSample := time.Now().Add(sampleEvery)
+	deadline := time.Now().Add(budget)
+
+	for time.Now().Before(deadline) {
+		start := time.Now()
+		errA := soakRoundTrip(cA, dstA, oid, prop, byte(ok))
+		errB := soakRoundTrip(cB, dstB, oid, prop, byte(ok))
+		if errA != nil || errB != nil {
+			failed++
+			if errA != nil {
+				lastErr = errA
+			} else {
+				lastErr = errB
+			}
+		} else {
+			ok++
+			if elapsed := time.Since(start); elapsed > worst {
+				worst = elapsed
+			}
+		}
+		if time.Now().After(nextSample) {
+			if g := runtime.NumGoroutine(); g > maxGoroutines {
+				maxGoroutines = g
+			}
+			nextSample = time.Now().Add(sampleEvery)
+		}
+		time.Sleep(soakPollInterval)
+	}
+
+	if failed != 0 {
+		t.Fatalf("%d of %d rounds were unanswered over %s (last error: %v)", failed, ok+failed, budget, lastErr)
+	}
+	if maxGoroutines > baseGoroutines+8 {
+		t.Fatalf("goroutines grew %d -> %d during the soak", baseGoroutines, maxGoroutines)
+	}
+	for name, f := range map[string]*fixture{"a": fA, "b": fB} {
+		if pending := testutil.ToFloat64(f.metrics.Pending); pending != 0 {
+			t.Fatalf("device %s pending gauge = %v after the soak, want 0: state was left behind", name, pending)
+		}
+	}
+
+	runtime.GC()
+	var endHeap runtime.MemStats
+	runtime.ReadMemStats(&endHeap)
+	if grew := int64(endHeap.HeapAlloc) - int64(baseHeap.HeapAlloc); grew > 24<<20 {
+		t.Fatalf("live heap grew %.1fMiB over the soak (%.1fMiB -> %.1fMiB): something retains per-request state",
+			float64(grew)/(1<<20), float64(baseHeap.HeapAlloc)/(1<<20), float64(endHeap.HeapAlloc)/(1<<20))
+	}
+
+	t.Logf("multi-device soak: %s, %d rounds, worst round trip %s, goroutines %d (baseline %d, peak %d), live heap %.1fMiB -> %.1fMiB",
+		budget, ok, worst.Round(time.Millisecond), runtime.NumGoroutine(), baseGoroutines, maxGoroutines,
+		float64(baseHeap.HeapAlloc)/(1<<20), float64(endHeap.HeapAlloc)/(1<<20))
+}

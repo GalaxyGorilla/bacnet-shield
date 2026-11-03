@@ -252,7 +252,9 @@ file to re-read and the flags came from the command line.
   reports a divergence; record it in `CONFORMANCE.md`.
 - **Soak tests** are opt-in: `make soak` sets `BACNET_SHIELD_SOAK=1` and
   `BACNET_SHIELD_SOAK_DURATION` (default 10m). They assert bounded tables,
-  flat goroutines/heap and zero unanswered requests.
+  flat goroutines/heap and zero unanswered requests for the single-device
+  steady state, the multi-device co-hosting shape, and the spoofed-source
+  rate-limit flood.
 - **Independent peer**: `make peers` provisions bacpypes3 0.0.110 in `.venv`;
   `make interop` drives the built binary on both IP legs, including a COV
   subscription whose notification is triggered by a write, a segmented
