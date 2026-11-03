@@ -4,7 +4,7 @@
 
 BINARY := bacnet-shield
 GO     ?= go
-VERSION ?= 1.0.0
+VERSION ?= 1.0.1
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
 .PHONY: all build test fmt-check vet staticcheck govulncheck race verify acceptance security peers interop interop-sc sc-hub-image soak cover release release-all release-assets sbom vulnscan clean

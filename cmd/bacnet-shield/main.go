@@ -32,7 +32,7 @@ import (
 )
 
 // version is overridden for releases via -ldflags "-X main.version=...".
-var version = "1.0.0"
+var version = "1.0.1"
 
 func main() {
 	os.Exit(run())
