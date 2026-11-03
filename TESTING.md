@@ -114,9 +114,10 @@ as failures.
 ## Soak
 
 `make soak` runs `TestSoakRateLimiterSpoofedSources`,
-`TestSoakSteadyState` and `TestSoakMultiDeviceSteadyState`. They are skipped
-in the normal suite (a ten-minute test would make `go test ./...` useless as
-an edit loop). Override the budget for a quick check:
+`TestSoakSteadyState`, `TestSoakMultiDeviceSteadyState` and
+`TestSoakMultiClientSteadyState`. They are skipped in the normal suite (a
+ten-minute test would make `go test ./...` useless as an edit loop). Override
+the budget for a quick check:
 
 ```sh
 SOAK_DURATION=30s make soak
@@ -128,7 +129,9 @@ while full. The steady-state soak keeps a real request/response loop running
 and asserts zero unanswered requests, bounded goroutines, bounded live heap
 and a pending gauge back at zero. The multi-device variant keeps two
 independent listener↔device pairs busy in one process and asserts the same
-flatness plus both pending gauges at zero.
+flatness plus both pending gauges at zero. The multi-client variant keeps eight
+independent clients on one device, exercising the per-client invoke-ID space
+and the pending table under concurrent allocation.
 
 ## Independent peer
 

@@ -253,11 +253,13 @@ file to re-read and the flags came from the command line.
 - **Soak tests** are opt-in: `make soak` sets `BACNET_SHIELD_SOAK=1` and
   `BACNET_SHIELD_SOAK_DURATION` (default 10m). They assert bounded tables,
   flat goroutines/heap and zero unanswered requests for the single-device
-  steady state, the multi-device co-hosting shape, and the spoofed-source
-  rate-limit flood.
+  steady state, the multi-device co-hosting shape, the multi-client fan-in
+  shape, and the spoofed-source rate-limit flood.
 - **Independent peer**: `make peers` provisions bacpypes3 0.0.110 in `.venv`;
   `make interop` drives the built binary on both IP legs, including a COV
-  subscription whose notification is triggered by a write, a segmented
+  subscription whose notification is triggered by a write, a confirmed COV
+  notification that the device must segment (the fixture reports a long
+  description and the client advertises a 50-byte APDU), a segmented
   response the client forces with a small max APDU, and the on-disk audit
   record of a refused write. `make sc-hub-image` builds bacnet-stack 1.6.1's
   `sc-hub` + BSC clients in Docker; `make interop-sc` drives the built binary

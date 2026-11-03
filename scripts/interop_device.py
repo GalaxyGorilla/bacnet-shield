@@ -16,11 +16,26 @@ import sys
 from bacpypes3.argparse import SimpleArgumentParser
 from bacpypes3.app import Application
 from bacpypes3.local.analog import AnalogValueObject
+from bacpypes3.local.cov import COVIncrementCriteria
 
 # Longer than one 50-byte APDU, so a client that advertises a small
 # max-apdu-length forces the device to send a segmented ComplexACK. The proxy
 # must relay every segment and carry the client's SegmentACKs back.
 DESCRIPTION = "segmented " * 12
+
+
+class LongCOVCriteria(COVIncrementCriteria):
+    """Report the long description alongside the value.
+
+    The standard COV notification reports present-value and status-flags,
+    which fit in one small APDU. Adding the 120-character description makes a
+    confirmed notification exceed a 50-byte client APDU, so the device must
+    send it as a segmented confirmed request. The service and encoding stay
+    standard; only the fixture's reported property list is larger.
+    """
+
+    properties_tracked = COVIncrementCriteria.properties_tracked + ("description",)
+    properties_reported = ("presentValue", "statusFlags", "description")
 
 
 class CovAnalogValueObject(AnalogValueObject):
@@ -35,6 +50,8 @@ class CovAnalogValueObject(AnalogValueObject):
     where the monitors run. This is a fixture adjustment, not a proxy
     adaptation; the wire on both sides stays standard.
     """
+
+    _cov_criteria = LongCOVCriteria
 
     async def write_property(self, attr, value, index=None, priority=None):
         if isinstance(attr, int):

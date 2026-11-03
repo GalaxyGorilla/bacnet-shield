@@ -165,17 +165,22 @@ async def run(app: Application, target: Address) -> int:
             print(f"i-am {i_am.iAmDeviceIdentifier} from {i_am.pduSource}")
         return 0
 
-    if op == "cov":
+    if op in ("cov", "cov-confirmed"):
         # Subscribe to the monitored object, change it, and wait for the
         # notification to come back through the proxy. Unconfirmed
-        # notifications keep the exchange one-way past the device, which is
-        # what a real COV consumer uses.
+        # notifications keep the exchange one-way past the device; the
+        # confirmed variant makes the device initiate a confirmed request
+        # (and, with the fixture's long description, a segmented one) that
+        # the proxy must relay and answer with the client's ACK.
         value = float(os.environ.get("BACNET_VALUE", "2.5"))
+        confirmed = op == "cov-confirmed"
+        if confirmed:
+            app.device_object.maxApduLengthAccepted = 50
         async with app.change_of_value(
             target,
             oid,
             subscriber_process_identifier=1,
-            issue_confirmed_notifications=False,
+            issue_confirmed_notifications=confirmed,
             lifetime=60,
         ) as scm:
             req = WritePropertyRequest(
@@ -192,6 +197,9 @@ async def run(app: Application, target: Address) -> int:
             # arrives (or the deadline passes).
             loop = asyncio.get_event_loop()
             deadline = loop.time() + 8.0
+            got_value = None
+            desc_len = 0
+            desc_prop = PropertyIdentifier("description")
             while True:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
@@ -200,16 +208,23 @@ async def run(app: Application, target: Address) -> int:
                     pv = await asyncio.wait_for(scm.get(), timeout=remaining)
                 except asyncio.TimeoutError:
                     break
+                if pv.propertyIdentifier == desc_prop:
+                    desc_len = len(_string(pv.value))
+                    continue
                 if pv.propertyIdentifier != prop:
                     # A notification for an analog value may carry more than
                     # one property (status-flags alongside present-value);
                     # only the monitored property is the one under test.
                     continue
-                got = _real(pv.value)
-                if got == value:
-                    print(f"cov {oid} {prop} = {got}")
+                got_value = _real(pv.value)
+                # The confirmed variant deliberately reports the 120-char
+                # description; with a 50-byte client APDU the device cannot
+                # fit that in one APDU, so receiving it proves the proxy
+                # relayed a segmented device-initiated request.
+                if got_value == value and (not confirmed or desc_len >= 120):
+                    print(f"{op} {oid} {prop} = {got_value} (description {desc_len} chars)")
                     return 0
-        return _fail(f"no COV notification with the changed value {value}")
+        return _fail(f"no {op} notification with the changed value {value}")
 
     return _fail(f"unknown BACNET_OP {op!r}")
 

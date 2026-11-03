@@ -169,6 +169,12 @@ run_client cov analog-value,1 present-value "" 4.25 || fail "cov notification"
 echo "== read back the COV-changed value"
 run_client read analog-value,1 present-value 4.25 || fail "cov read-back"
 
+echo "== confirmed COV: device-initiated segmented request relayed and acknowledged"
+run_client cov-confirmed analog-value,1 present-value "" 4.75 || fail "confirmed segmented COV"
+
+echo "== read back the confirmed-COV-changed value"
+run_client read analog-value,1 present-value 4.75 || fail "confirmed COV read-back"
+
 echo "== segmented response relayed through the proxy"
 run_client read-long analog-value,1 description 120 || fail "segmented read"
 

@@ -71,6 +71,7 @@ bacnet-stack BSC client that is a second node of the same hub:
 | Write still denied for an uncovered object | The allow rule covers exactly one target; a sibling object is still refused |
 | COV subscription and notification | A third-party client subscribes, changes the monitored value with a write, and receives the device's notification back through the proxy — proving subscriber routing, not broadcast, on the IP leg |
 | Segmented response | The client advertises a 50-byte max APDU and reads a 120-byte description, so the device's ComplexACK spans several segments; the reassembled value proves the proxy relayed every segment and carried the client's SegmentACKs back |
+| Device-initiated segmented request | The client subscribes with confirmed notifications and a 50-byte max APDU; the fixture's COV criteria report the 120-character description, so the device sends a segmented `ConfirmedCOVNotification`. The client must receive the full description (impossible without segmentation) and its SimpleACK must reach the device |
 | Segmented write | The same client writes a 256-byte description with a 50-byte max APDU; the proxy acknowledges the segments itself, reassembles and authorizes the complete write, the device sees one unsegmented request, and a read-back plus `bacnet_shield_segmented_writes_total` prove the path |
 
 The SC interop run repeats the IP-leg scenarios across the secure leg at the
@@ -186,26 +187,29 @@ the log line is the whole response.
 - **One peer only.** bacpypes3 is a current, specification-minded stack. A
   legacy controller may disagree with it; the response is to report the
   divergence here, not to normalize it inside the proxy.
-- **Segmented responses and segmented writes are interop-covered; other
-  segmented requests are not.** The Python client advertises a 50-byte max APDU
-  and reads a 120-byte description, so the real device answers with a
+- **Segmented responses, segmented writes and device-initiated segmented
+  requests are interop-covered.** The Python client advertises a 50-byte max
+  APDU and reads a 120-byte description, so the real device answers with a
   multi-segment ComplexACK and the proxy relays every segment and carries the
   client's SegmentACKs back. In the other direction, the same client writes a
   256-byte description with a 50-byte max APDU, so the request is segmented;
   the proxy ACKs the segments, reassembles and authorizes them, and the device
   sees one unsegmented write (confirmed by a read-back and by
-  `bacnet_shield_segmented_writes_total`). Device-initiated segmented
-  *requests* (a segmented confirmed COV/event notification) are still pinned by
-  in-process tests only; forcing one from the peer needs the same payload trick
-  in the other direction.
+  `bacnet_shield_segmented_writes_total`). For a device-initiated request the
+  client subscribes with confirmed notifications and a 50-byte APDU, and the
+  fixture's COV criteria report a 120-character description; the device must
+  segment its `ConfirmedCOVNotification`, and the client's receipt of the full
+  description plus its SimpleACK proves the proxy relayed the segments and the
+  answer. Event-notification segmentation is still pinned by in-process tests
+  only (no driver triggers one).
 - **COV interop is single-object and driver-triggered.** The Python client
-  exercises `SubscribeCOV` and an unconfirmed notification, and the SC run
-  drives `SubscribeCOV` through a bacnet-stack subscriber. Multi-object COV
+  exercises `SubscribeCOV` with both unconfirmed and confirmed notifications
+  (the confirmed one is segmented, above), and the SC run drives
+  `SubscribeCOV` through a bacnet-stack subscriber. Multi-object COV
   (`SubscribeCOVPropertyMultiple` and the two `COVNotificationMultiple`
   services) is implemented and pinned by wire-level Go tests, but neither peer
   implements it (both mark the service TODO), so there is no independent drive
-  yet. Confirmed-notification interop and subscription expiry across a long run
-  are also in-process only.
+  yet. Subscription expiry across a long run is also in-process only.
 - **No BACnet/SC direct (node-to-node) interop.** The proxy attaches to a hub,
   which is the v1 shape. Direct connections are out of scope; see
   [BACKLOG.md](BACKLOG.md).

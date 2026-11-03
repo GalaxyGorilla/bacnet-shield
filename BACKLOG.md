@@ -17,9 +17,11 @@ steps, not missing pieces of the documented co-hosting gateway.
 - Device source validation with a learned source port.
 - CLI (`gateway`, `validate`, `selftest`, `version`), YAML/flags config,
   `SIGHUP` policy reload, systemd watchdog, Prometheus metrics.
-- bacpypes3 0.0.110 interop on both legs, including reload and read-back.
+- bacpypes3 0.0.110 interop on both legs, including reload and read-back,
+  a segmented response, a client-segmented write, and a device-initiated
+  segmented confirmed COV notification.
 - Soak tests for the spoofed-source rate-limit flood, single-device
-  steady-state forwarding, and multi-device co-hosting.
+  steady-state forwarding, multi-device co-hosting, and multi-client fan-in.
 
 ## Done — post-v1 (kept for reference)
 
@@ -159,11 +161,15 @@ rejected.
 
 ### B6 — Segmented-request interop
 
-Segmented *responses* now have an interop scenario (the Python client advertises
-a small max APDU and reads a large property). Extend the driver to force a
-device-initiated segmented *request* (a segmented confirmed COV/event
-notification) so that direction is peer-verified too; today it is pinned by
-in-process tests only. See [CONFORMANCE.md](CONFORMANCE.md).
+DONE. Segmented *responses* have an interop scenario (the Python client
+advertises a small max APDU and reads a large property). The driver now also
+forces a device-initiated segmented *request*: the client subscribes with
+confirmed notifications and a 50-byte APDU, and the fixture's COV criteria
+report the 120-character `description`, so the device sends a segmented
+`ConfirmedCOVNotification` through the proxy. The client asserts it received
+the full description (impossible without segmentation) and answers with the
+SimpleACK; the interop script fails if the notification is not relayed. See
+[CONFORMANCE.md](CONFORMANCE.md).
 
 ### B7 — Physical commissioning matrix
 
